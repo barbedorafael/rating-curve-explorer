@@ -71,8 +71,8 @@ db.plot_rating_curve(station=86720000, level_breaks=[100, 300, 600], fit=True)
 
 # Documentação mais detalhada
 
-- [Curva‑chave: método](.docs/rating_curve_method.md) — modelo, segmentação, ajustes
-- [Layout de dados](.docs/data_layout.md) — convenções para os dados de entrada e organização do banco de dados para análise
+- [Curva‑chave: método](docs/rating_curve_method.md) — modelo, segmentação, ajustes
+- [Layout de dados](docs/data_layout.md) — convenções para os dados de entrada e organização do banco de dados para análise
 
 ## Colaboração (Git)
 
