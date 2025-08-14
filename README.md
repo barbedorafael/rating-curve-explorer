@@ -47,7 +47,7 @@ python scripts/db_load.py
 ### Visualizações
 
 ```python
-from scripts.viz import HydroDB
+from scripts.hydrodb import HydroDB
 db = HydroDB("data/hydrodata.sqlite")
 
 # Séries
