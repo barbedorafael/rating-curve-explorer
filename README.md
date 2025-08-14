@@ -17,8 +17,6 @@ RATING_CURVE_EXPLORER/
 │   └── hydrodb.py                # classe HydroDB (timeseries, vertical profile, rating curve)
 │
 ├── docs/
-│   ├── usage.md                  # como rodar ETL, fazer plots, exemplos
-│   ├── db_schema.md              # descrição das tabelas e chaves
 │   ├── rating_curve_method.md    # modelo, segmentação, ajustes, boas práticas
 │   └── data_layout.md            # convenções de arquivos/pastas em data/
 │
