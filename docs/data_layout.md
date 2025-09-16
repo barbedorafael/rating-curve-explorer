@@ -157,11 +157,3 @@ Constraint: `PRIMARY KEY (survey_id, distance)`.
 
   * `stage_discharge.level`, `width`, `depth` were set in centimeters per source; convert as needed in analytics.
   * `discharge` in m³/s; `area` m²; `velocity` m/s.
-* Suggested indexes (optional, for speed with large volumes):
-
-  * `CREATE INDEX idx_cota_station_date ON timeseries_cota(station_id, date);`
-  * `CREATE INDEX idx_vazao_station_date ON timeseries_vazao(station_id, date);`
-  * `CREATE INDEX idx_sd_station_date ON stage_discharge(station_id, date);`
-  * `CREATE INDEX idx_vp_survey ON vertical_profile(survey_id);`
-
-

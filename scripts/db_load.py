@@ -13,6 +13,13 @@ SCHEMA_PATH = ROOT / "schema.sql"
 
 
 # ----------------- tiny utils -----------------
+
+def _first(df, names):
+    for n in names:
+        if n in df.columns:
+            return n
+    return None
+
 def _to_float(v):
     if v is None:
         return None
@@ -35,12 +42,6 @@ def _to_int(v):
     except ValueError:
         return None
 
-def _first(df, names):
-    for n in names:
-        if n in df.columns:
-            return n
-    return None
-
 
 def _date_txt(v):
     try:
@@ -52,7 +53,7 @@ def _date_txt(v):
         return None
 
 
-def _melt_monthly(df: pd.DataFrame, prefix: str, station_id: int):
+def _melt_monthly(df: pd.DataFrame, prefix: str):
     """
     Wide monthly (prefix01..prefix31 [+ Status]) -> rows:
     (station_id, date, method:int|None, value:float, status:int|None)
@@ -68,6 +69,7 @@ def _melt_monthly(df: pd.DataFrame, prefix: str, station_id: int):
 
     out = []
     for _, row in df.iterrows():
+        station_id = row["EstacaoCodigo"]
         base = row["Data"]
         if pd.isna(base):
             continue
@@ -105,94 +107,78 @@ def init_db():
             conn.executescript(f.read())
         conn.execute("PRAGMA foreign_keys = ON;")
 
-def load_station(conn, sdir, sid):
+def load_station(conn, data_dir: Path):
     """Load station metadata from _Estacao_.csv into stations table."""
-    estacao_csv = sdir / "_Estacao_.csv"
+    estacao_csv = data_dir / "_Estacao_.csv"
     df = pd.read_csv(estacao_csv)
 
-    row = {
-        "station_id": sid,  # enforce folder ID
-        "name": df.at[0, "Nome"],
-        "station_type": df.at[0, "TipoEstacao"],
-        "lon": df.at[0, "Longitude"],
-        "lat": df.at[0, "Latitude"],
-        "basin_id": df.at[0, "BaciaCodigo"],
-        "sub_basin_id": df.at[0, "SubBaciaCodigo"],
-        "river_id": df.at[0, "RioCodigo"],
-        "state_id": df.at[0, "EstadoCodigo"],
-        "municipality_id": df.at[0, "MunicipioCodigo"],
-        "responsible_id": df.at[0, "ResponsavelCodigo"],
-        "responsible_unit": df.at[0, "ResponsavelUnidade"],
-        "responsible_jurisdiction": df.at[0, "ResponsavelJurisdicao"],
-        "operator_id": df.at[0, "OperadoraCodigo"],
-        "operator_unit": df.at[0, "OperadoraUnidade"],
-        "operator_subunit": df.at[0, "OperadoraSubUnidade"],
-        "additional_code": df.at[0, "CodigoAdicional"],
-        "altitude": df.at[0, "Altitude"],
-        "drainage_area": df.at[0, "AreaDrenagem"],
-    }
+    # Handle multiple stations in single CSV
+    for _, station_row in df.iterrows():
+        row = {
+            "station_id": _to_int(station_row.get("EstacaoCodigo")),
+            "name": station_row.get("Nome"),
+            "station_type": station_row.get("TipoEstacao"),
+            "lon": _to_float(station_row.get("Longitude")),
+            "lat": _to_float(station_row.get("Latitude")),
+            "basin_id": _to_int(station_row.get("BaciaCodigo")),
+            "sub_basin_id": _to_int(station_row.get("SubBaciaCodigo")),
+            "river_id": _to_int(station_row.get("RioCodigo")),
+            "state_id": _to_int(station_row.get("EstadoCodigo")),
+            "municipality_id": _to_int(station_row.get("MunicipioCodigo")),
+            "responsible_id": _to_int(station_row.get("ResponsavelCodigo")),
+            "responsible_unit": station_row.get("ResponsavelUnidade"),
+            "responsible_jurisdiction": station_row.get("ResponsavelJurisdicao"),
+            "operator_id": _to_int(station_row.get("OperadoraCodigo")),
+            "operator_unit": station_row.get("OperadoraUnidade"),
+            "operator_subunit": station_row.get("OperadoraSubUnidade"),
+            "additional_code": station_row.get("CodigoAdicional"),
+            "altitude": _to_float(station_row.get("Altitude")),
+            "drainage_area": _to_float(station_row.get("AreaDrenagem")),
+        }
 
-    conn.execute("""
-        INSERT OR REPLACE INTO stations (
-            station_id, name, station_type, lon, lat, basin_id, sub_basin_id, river_id,
-            state_id, municipality_id, responsible_id, responsible_unit,
-            responsible_jurisdiction, operator_id, operator_unit, operator_subunit,
-            additional_code, altitude, drainage_area
-        )
-        VALUES (
-            :station_id, :name, :station_type, :lon, :lat, :basin_id, :sub_basin_id, :river_id,
-            :state_id, :municipality_id, :responsible_id, :responsible_unit,
-            :responsible_jurisdiction, :operator_id, :operator_unit, :operator_subunit,
-            :additional_code, :altitude, :drainage_area
-        )
-    """, row)
+        conn.execute("""
+            INSERT OR REPLACE INTO stations (
+                station_id, name, station_type, lon, lat, basin_id, sub_basin_id, river_id, state_id, municipality_id, responsible_id, responsible_unit, responsible_jurisdiction, operator_id, operator_unit,  operator_subunit, additional_code, altitude, drainage_area
+            )
+            VALUES (
+                :station_id, :name, :station_type, :lon, :lat, :basin_id, :sub_basin_id, :river_id, :state_id, :municipality_id, :responsible_id, :responsible_unit, :responsible_jurisdiction, :operator_id, :operator_unit, :operator_subunit, :additional_code, :altitude, :drainage_area
+            )
+        """, row)
 
-def load_timeseries(conn, station_dir: Path, station_id: int):
+def load_timeseries(conn, data_dir: Path):
     for file in ["_Cotas_.csv", "_Vazoes_.csv"]:
-        path = station_dir / file
+        path = data_dir / file
         df = pd.read_csv(path, dtype=str)
         if file == "_Cotas_.csv":
             prefix = "Cota"
         elif file == "_Vazoes_.csv":
             prefix = "Vazao"
-        rows = _melt_monthly(df, prefix, station_id)
+        rows = _melt_monthly(df, prefix)
         conn.executemany(
             "INSERT OR REPLACE INTO timeseries_cota (station_id, date, method, value, status) VALUES (?, ?, ?, ?, ?)",
             rows,
         )
 
-def load_stage_discharge(conn, station_dir: Path, station_id: int):
-    path = station_dir / "_ResumoDescarga_.csv"
-    if not path.exists():
-        return
-    df = pd.read_csv(path, dtype=str)
-    station_col = _first(df, ["EstacaoCodigo"])
-    date_col = _first(df, ["Data"])
-    time_col = _first(df, ["Hora"])
-    consistency_col = _first(df, ["NivelConsistencia"])
-    stage_col = _first(df, ["Cota"])
-    q_col = _first(df, ["Vazao"])
-    vel_col = _first(df, ["VelMedia"])
-    width_col = _first(df, ["Largura"])
-    depth_col = _first(df, ["Profundidade"])
-    area_col = _first(df, ["AreaMolhada"])
-    instr_col = _first(df, ["MedidorVazao"])
+def load_stage_discharge(conn, data_dir: Path):
+    path = data_dir / "_ResumoDescarga_.csv"
+
+    df = pd.read_csv(path)
 
     rows = []
     for _, r in df.iterrows():
         rows.append(
             (
-                int(str(r.get(station_col) or station_id).strip()),
-                _date_txt(r.get(date_col)),
-                (str(r.get(time_col)).strip()[-12:-7] if r.get(time_col) not in (None, "", "NaN") else None),
-                _to_int(r.get(consistency_col)),
-                _to_float(r.get(stage_col)),
-                _to_float(r.get(q_col)),
-                _to_float(r.get(area_col)),
-                _to_float(r.get(vel_col)),
-                _to_float(r.get(width_col)),
-                _to_float(r.get(depth_col)),
-                _to_int(r.get(instr_col)),
+                int(str(r.get("EstacaoCodigo"))),
+                _date_txt(r.get("Data")),
+                (str(r.get("Hora")).strip()[-12:-7] if r.get("Hora") not in (None, "", "NaN") else None),
+                _to_int(r.get("NivelConsistencia")),
+                _to_float(r.get("Cota")),
+                _to_float(r.get("Vazao")),
+                _to_float(r.get("AreaMolhada")),
+                _to_float(r.get("VelMedia")),
+                _to_float(r.get("Largura")),
+                _to_float(r.get("Profundidade")),
+                _to_int(r.get("MedidorVazao")),
             )
         )
     conn.executemany(
@@ -204,43 +190,39 @@ def load_stage_discharge(conn, station_dir: Path, station_id: int):
         rows,
     )
 
-
-def load_vertical_profiles(conn, station_dir: Path, station_id: int):
+def load_vertical_profiles(conn, data_dir: Path):
     # surveys
-    survey_path = station_dir / "_PerfilTransversal_.csv"
-    if survey_path.exists():
-        df = pd.read_csv(survey_path, dtype=str)
-        survey_id_col = _first(df, ["PerfilTransversalCodigo", "RegistroID", "Codigo"])
-        date_col = _first(df, ["DataLevantamento", "Data"])
-        rows = []
-        for _, r in df.iterrows():
-            sid_raw = r.get(survey_id_col)
-            if sid_raw in (None, "", "NaN") or pd.isna(sid_raw):
-                continue
-            try:
-                survey_id = int(str(sid_raw).split(".")[0])
-            except Exception:
-                continue
-            dt = _date_txt(r.get(date_col))
-            if not dt:
-                continue
-            rows.append(
-                (
-                    survey_id,
-                    station_id if r.get("EstacaoCodigo") in (None, "", "NaN") else int(str(r.get("EstacaoCodigo")).split(".")[0]),
-                    dt,
-                    _to_float(r.get("NumLevantamento")),
-                    (r.get("TipoSecao") if r.get("TipoSecao") not in (None, "", "NaN") else None),
-                    _to_float(r.get("NumVerticais")),
-                    _to_float(r.get("DistanciaPIPF")),
-                    _to_float(r.get("EixoXDistMaxima")),
-                    _to_float(r.get("EixoXDistMinima")),
-                    _to_float(r.get("EixoYCotaMaxima")),
-                    _to_float(r.get("EixoYCotaMinima")),
-                    _to_float(r.get("ElmGeomPassoCota")),
-                    (r.get("Observacoes") if r.get("Observacoes") not in (None, "", "NaN") else None),
-                )
+    survey_path = data_dir / "_PerfilTransversal_.csv"
+    df = pd.read_csv(survey_path, dtype=str)
+    rows = []
+    for _, r in df.iterrows():
+        sid_raw = r.get("RegistroID")
+        if sid_raw in (None, "", "NaN") or pd.isna(sid_raw):
+            continue
+        try:
+            survey_id = int(str(sid_raw).split(".")[0])
+        except Exception:
+            continue
+        dt = _date_txt(r.get("Data"))
+        if not dt:
+            continue
+        rows.append(
+            (
+                survey_id,
+                int(str(r.get("EstacaoCodigo"))),
+                dt,
+                _to_float(r.get("NumLevantamento")),
+                (r.get("TipoSecao") if r.get("TipoSecao") not in (None, "", "NaN") else None),
+                _to_float(r.get("NumVerticais")),
+                _to_float(r.get("DistanciaPIPF")),
+                _to_float(r.get("EixoXDistMaxima")),
+                _to_float(r.get("EixoXDistMinima")),
+                _to_float(r.get("EixoYCotaMaxima")),
+                _to_float(r.get("EixoYCotaMinima")),
+                _to_float(r.get("ElmGeomPassoCota")),
+                (r.get("Observacoes") if r.get("Observacoes") not in (None, "", "NaN") else None),
             )
+        )
         conn.executemany(
             """
             INSERT OR REPLACE INTO vertical_profile_survey (
@@ -252,39 +234,58 @@ def load_vertical_profiles(conn, station_dir: Path, station_id: int):
         )
 
     # points
-    points_path = station_dir / "_PerfilTransversalVert_.csv"
+    points_path = data_dir / "_PerfilTransversalVert_.csv"
     if points_path.exists():
         dfp = pd.read_csv(points_path, dtype=str)
-        survey_fk_col = _first(dfp, ["PerfilTransversalCodigo", "RegistroID", "Codigo"])
-        if survey_fk_col:
-            rows = []
-            for _, r in dfp.iterrows():
-                sid_raw = r.get(survey_fk_col)
-                if sid_raw in (None, "", "NaN") or pd.isna(sid_raw):
-                    continue
-                try:
-                    survey_id = int(str(sid_raw).split(".")[0])
-                except Exception:
-                    continue
-                rows.append((survey_id, _to_float(r.get("Distancia")), _to_float(r.get("Cota"))))
-            conn.executemany(
-                "INSERT OR REPLACE INTO vertical_profile (survey_id, distance, elevation) VALUES (?, ?, ?)", rows
-            )
+        rows = []
+        for _, r in dfp.iterrows():
+            rows.append(
+                (int(str(r.get("RegistroID"))), 
+                 _to_float(r.get("Distancia")), 
+                 _to_float(r.get("Cota"))))
+        conn.executemany(
+            "INSERT OR REPLACE INTO vertical_profile (survey_id, distance, elevation) VALUES (?, ?, ?)", rows
+        )
 
+def load_rating_curves(conn, data_dir: Path):
+      """Load rating curve parameters from _CurvaDescarga_.csv into rating_curve 
+  table."""
+      path = data_dir / "_CurvaDescarga_.csv"
+      if not path.exists():
+          return
+
+      df = pd.read_csv(path, dtype=str)
+
+      rows = []
+      for _, r in df.iterrows():
+          rows.append((
+              int(str(r.get("EstacaoCodigo"))),
+              str(r.get("NumeroCurva")),
+              _date_txt(r.get("PeriodoValidadeInicio")),
+              _date_txt(r.get("PeriodoValidadeFim")),
+              _to_int(r.get("CotaMinima")),
+              _to_int(r.get("CotaMaxima")),
+              _to_float(r.get("CoefH0")),
+              _to_float(r.get("CoefA")),
+              _to_float(r.get("CoefN"))
+          ))
+
+      conn.executemany("""
+          INSERT OR REPLACE INTO rating_curve (
+              station_id, segment_number, start_date, end_date, h_min, h_max, h0_param, a_param, n_param
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      """, rows)
 
 # ----------------- main -----------------
 def main():
     init_db()
     with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("PRAGMA foreign_keys = ON;")
-
-        # walk station folders: data/<digits>/
-        for sdir in sorted([p for p in DATA_DIR.iterdir() if p.is_dir() and p.name.isdigit()]):
-            sid = int(sdir.name)
-            load_station(conn, sdir, sid)
-            load_timeseries(conn, sdir, sid)
-            load_stage_discharge(conn, sdir, sid)
-            load_vertical_profiles(conn, sdir, sid)
+        tables_dir = DATA_DIR / "raw_tables"
+        load_station(conn, tables_dir)
+        load_timeseries(conn, tables_dir)
+        load_stage_discharge(conn, tables_dir)
+        load_vertical_profiles(conn, tables_dir)
+        load_rating_curves(conn, tables_dir)
 
     print(f"Loaded into {DB_PATH}")
 
