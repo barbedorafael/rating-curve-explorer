@@ -108,6 +108,6 @@ CREATE TABLE IF NOT EXISTS vertical_profile (
       h0_param REAL,                 -- coefficient h0 in Q = a*(H-h0)^n
       a_param REAL,                  -- coefficient a in Q = a*(H-h0)^n
       n_param REAL,                  -- exponent n in Q = a*(H-h0)^n
-      insert_date TEXT NOT NULL,      -- date inserted
+      date_inserted TEXT,            -- date inserted
       PRIMARY KEY (station_id,  segment_number)
   );

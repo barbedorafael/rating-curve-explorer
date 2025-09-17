@@ -101,7 +101,8 @@ def _melt_monthly(df: pd.DataFrame, prefix: str):
 
 # ----------------- loaders -----------------
 def init_db():
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if DB_PATH.exists():
+        DB_PATH.unlink()
     with sqlite3.connect(DB_PATH) as conn:
         with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
             conn.executescript(f.read())
@@ -148,6 +149,8 @@ def load_station(conn, data_dir: Path):
 def load_timeseries(conn, data_dir: Path):
     for file in ["_Cotas_.csv", "_Vazoes_.csv"]:
         path = data_dir / file
+        if not path.exists():
+            continue
         df = pd.read_csv(path, dtype=str)
         if file == "_Cotas_.csv":
             prefix = "Cota"
@@ -196,21 +199,11 @@ def load_vertical_profiles(conn, data_dir: Path):
     df = pd.read_csv(survey_path, dtype=str)
     rows = []
     for _, r in df.iterrows():
-        sid_raw = r.get("RegistroID")
-        if sid_raw in (None, "", "NaN") or pd.isna(sid_raw):
-            continue
-        try:
-            survey_id = int(str(sid_raw).split(".")[0])
-        except Exception:
-            continue
-        dt = _date_txt(r.get("Data"))
-        if not dt:
-            continue
         rows.append(
             (
-                survey_id,
+                int(str(r.get("RegistroID")).split(".")[0]),
                 int(str(r.get("EstacaoCodigo"))),
-                dt,
+                _date_txt(r.get("Data")),
                 _to_float(r.get("NumLevantamento")),
                 (r.get("TipoSecao") if r.get("TipoSecao") not in (None, "", "NaN") else None),
                 _to_float(r.get("NumVerticais")),
@@ -240,7 +233,7 @@ def load_vertical_profiles(conn, data_dir: Path):
         rows = []
         for _, r in dfp.iterrows():
             rows.append(
-                (int(str(r.get("RegistroID"))), 
+                (int(str(r.get("RegistroID")).split(".")[0]), 
                  _to_float(r.get("Distancia")), 
                  _to_float(r.get("Cota"))))
         conn.executemany(
@@ -267,13 +260,14 @@ def load_rating_curves(conn, data_dir: Path):
               _to_int(r.get("CotaMaxima")),
               _to_float(r.get("CoefH0")),
               _to_float(r.get("CoefA")),
-              _to_float(r.get("CoefN"))
+              _to_float(r.get("CoefN")),
+              _date_txt(r.get("DataIns"))
           ))
 
       conn.executemany("""
           INSERT OR REPLACE INTO rating_curve (
-              station_id, segment_number, start_date, end_date, h_min, h_max, h0_param, a_param, n_param
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+              station_id, segment_number, start_date, end_date, h_min, h_max, h0_param, a_param, n_param, date_inserted
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       """, rows)
 
 # ----------------- main -----------------
