@@ -116,7 +116,7 @@ def load_station(conn, data_dir: Path):
     # Handle multiple stations in single CSV
     for _, station_row in df.iterrows():
         row = {
-            "station_id": _to_int(station_row.get("EstacaoCodigo")),
+            "station_id": _to_int(station_row.get("Codigo")),
             "name": station_row.get("Nome"),
             "station_type": station_row.get("TipoEstacao"),
             "lon": _to_float(station_row.get("Longitude")),
