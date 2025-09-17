@@ -100,14 +100,13 @@ CREATE TABLE IF NOT EXISTS vertical_profile (
   -- =========================
   CREATE TABLE IF NOT EXISTS rating_curve (
       station_id INTEGER NOT NULL REFERENCES stations(station_id),
-      segment_number TEXT NOT NULL,  -- XX/YY (XX=period, YY=range)
       start_date TEXT NOT NULL,      -- YYYY-MM-DD
       end_date TEXT,                 -- YYYY-MM-DD (can be NULL for current)
+      segment_number TEXT NOT NULL,  -- XX/YY (XX=period, YY=range)
       h_min INTEGER,                 -- height min in cm
       h_max INTEGER,                 -- height max in cm
       h0_param REAL,                 -- coefficient h0 in Q = a*(H-h0)^n
       a_param REAL,                  -- coefficient a in Q = a*(H-h0)^n
       n_param REAL,                  -- exponent n in Q = a*(H-h0)^n
-      date_inserted TEXT,            -- date inserted
-      PRIMARY KEY (station_id,  segment_number)
+      date_inserted TEXT            -- date inserted
   );
