@@ -216,7 +216,7 @@ def plot_timeseries_with_indicators(data, measured_data, rating_curves, station_
             ax.set_ylabel('Discharge (m³/s)', color='g')
             ax.tick_params(axis='y', labelcolor='g')
 
-    # Add rating curve validity indicators (SAME FOR BOTH PLOTS)
+    # Add rating curve validity indicators
     for _, curve in rating_curves.iterrows():
         # Only show indicators within the plot date range
         if curve['end_date'] >= plot_start and curve['start_date'] <= plot_end:
@@ -233,11 +233,11 @@ def plot_timeseries_with_indicators(data, measured_data, rating_curves, station_
             ax.hlines(curve['h_min'], line_start, line_end, colors='orange', linestyles=':', alpha=0.5, linewidth=1)
             ax.hlines(curve['h_max'], line_start, line_end, colors='orange', linestyles=':', alpha=0.5, linewidth=1)
 
-            # Add text annotation for segment BELOW the line
+            # Add text annotation for segment below the line
             mid_date = line_start + (line_end - line_start) / 2
-            y_pos = curve['h_min'] - (ax.get_ylim()[1] - ax.get_ylim()[0]) * 0.05
+            y_pos = curve['h_min']
             ax.text(mid_date, y_pos, f"Seg {curve['segment_number']}",
-                   rotation=0, fontsize=8, ha='center', color='red')
+                   rotation=0, fontsize=8, ha='center', va='bottom', color='red')
 
     # Add measured points (SAME FOR BOTH PLOTS)
     if not measured_data.empty:
@@ -269,7 +269,7 @@ def plot_timeseries_with_indicators(data, measured_data, rating_curves, station_
 
     # Format x-axis
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
-    ax.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
+    # ax.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
     plt.xticks(rotation=45)
 
     # Add legend
@@ -288,7 +288,7 @@ def plot_timeseries_with_indicators(data, measured_data, rating_curves, station_
 def main():
     """Main Streamlit app."""
 
-    st.title("🌊 Rating Curve Data Cleaning Dashboard")
+    st.title("🌊 Rating Curve Data Dashboard")
     st.markdown("Interactive tool for visualizing and cleaning hydrological data")
 
     # Sidebar for controls
