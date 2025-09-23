@@ -980,11 +980,11 @@ class RatingCurveAdjuster(BaseStationAnalyzer):
                 method='L-BFGS-B'
             )
             if result.success:
-                return float(result.x[0]), h0, float(result.x[1])
+                return round(float(result.x[0]), 3), round(h0, 3), round(float(result.x[1]), 3)
         except:
             pass
 
-        return a_initial, h0, n_initial
+        return round(a_initial, 3), round(h0, 3), round(n_initial, 3)
 
     def calculate_curve_discharge(self, levels: np.ndarray, a: float, h0: float, n: float) -> np.ndarray:
         """Calculate discharge values for given levels using rating curve equation."""
@@ -1562,6 +1562,16 @@ class DashboardApp:
         # Calculate default Hlim
         default_hlim = self.curve_adjuster.calculate_default_hlim(measurements)
 
+        # Global H_min setting
+        st.write("**Global Settings:**")
+        global_h_min = st.number_input(
+            "H_min (m) - Global minimum level for all segments",
+            value=0.0,
+            step=0.001,
+            format="%.3f",
+            key="global_h_min"
+        )
+
         # Segment management
         st.write("**Rating Curve Segments:**")
 
@@ -1569,12 +1579,55 @@ class DashboardApp:
         if not st.session_state.curve_segments:
             st.session_state.curve_segments = [{
                 'segment_num': 1,
-                'h_min': measurements['level_m'].min() if not measurements.empty else 0.0,
+                'h_min': global_h_min,
                 'h_max': default_hlim / 100,  # Convert to meters
                 'h0': 0.0,
                 'a': 1.0,
                 'n': 1.5
             }]
+
+        # Update first segment's h_min to match global setting
+        if st.session_state.curve_segments:
+            st.session_state.curve_segments[0]['h_min'] = global_h_min
+
+        # Global adjust button
+        if st.button("Adjust Curve(s)", type="primary"):
+            all_fitted = True
+            fitted_results = []
+
+            for i, segment in enumerate(st.session_state.curve_segments):
+                # Filter measurements for this segment
+                segment_measurements = measurements[
+                    (measurements['level_m'] >= segment['h_min']) &
+                    (measurements['level_m'] <= segment['h_max'])
+                ]
+
+                if not segment_measurements.empty:
+                    # Fit the curve
+                    a_fitted, h0_fitted, n_fitted = self.curve_adjuster.fit_rating_curve(
+                        segment_measurements, segment['h0'], segment['a'], segment['n']
+                    )
+
+                    # Update the segment
+                    segment['a'] = a_fitted
+                    segment['h0'] = h0_fitted
+                    segment['n'] = n_fitted
+
+                    fitted_results.append(f"Seg {segment['segment_num']}: a={a_fitted:.3f}, h0={h0_fitted:.3f}, n={n_fitted:.3f}")
+                else:
+                    fitted_results.append(f"Seg {segment['segment_num']}: No measurements in range")
+                    all_fitted = False
+
+            if all_fitted:
+                st.success("All curves fitted successfully!")
+            else:
+                st.warning("Some segments could not be fitted (no measurements in range)")
+
+            # Show fitting results
+            for result in fitted_results:
+                st.write(f"• {result}")
+
+            st.rerun()
 
         # Display segments
         segments_to_remove = []
@@ -1583,8 +1636,9 @@ class DashboardApp:
 
                 # Hlim input
                 if i == 0:
-                    # First segment starts from minimum measurement
-                    st.write(f"H_min: {segment['h_min']:.3f} m (from data)")
+                    # First segment starts from global H_min
+                    segment['h_min'] = global_h_min
+                    st.write(f"H_min: {segment['h_min']:.3f} m (global setting)")
                 else:
                     # Subsequent segments start from previous segment's Hlim
                     prev_h_max = st.session_state.curve_segments[i-1]['h_max']
@@ -1618,7 +1672,7 @@ class DashboardApp:
                         "a",
                         value=segment['a'],
                         min_value=0.001,
-                        step=0.1,
+                        step=0.001,
                         format="%.3f",
                         key=f"a_{i}"
                     )
@@ -1629,8 +1683,8 @@ class DashboardApp:
                         value=segment['n'],
                         min_value=0.1,
                         max_value=6.0,
-                        step=0.1,
-                        format="%.2f",
+                        step=0.001,
+                        format="%.3f",
                         key=f"n_{i}"
                     )
 
@@ -1656,46 +1710,6 @@ class DashboardApp:
                 'n': 1.5
             }
             st.session_state.curve_segments.append(new_segment)
-            st.rerun()
-
-        # Global adjust button
-        st.write("---")
-        if st.button("🔧 Adjust All Curves", type="primary"):
-            all_fitted = True
-            fitted_results = []
-
-            for i, segment in enumerate(st.session_state.curve_segments):
-                # Filter measurements for this segment
-                segment_measurements = measurements[
-                    (measurements['level_m'] >= segment['h_min']) &
-                    (measurements['level_m'] <= segment['h_max'])
-                ]
-
-                if not segment_measurements.empty:
-                    # Fit the curve
-                    a_fitted, h0_fitted, n_fitted = self.curve_adjuster.fit_rating_curve(
-                        segment_measurements, segment['h0'], segment['a'], segment['n']
-                    )
-
-                    # Update the segment
-                    segment['a'] = a_fitted
-                    segment['h0'] = h0_fitted
-                    segment['n'] = n_fitted
-
-                    fitted_results.append(f"Seg {segment['segment_num']}: a={a_fitted:.3f}, h0={h0_fitted:.3f}, n={n_fitted:.2f}")
-                else:
-                    fitted_results.append(f"Seg {segment['segment_num']}: No measurements in range")
-                    all_fitted = False
-
-            if all_fitted:
-                st.success("All curves fitted successfully!")
-            else:
-                st.warning("Some segments could not be fitted (no measurements in range)")
-
-            # Show fitting results
-            for result in fitted_results:
-                st.write(f"• {result}")
-
             st.rerun()
 
     def _render_adjustment_plots(self):
