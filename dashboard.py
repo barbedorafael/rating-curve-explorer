@@ -1564,13 +1564,14 @@ class DashboardApp:
 
         # Global H_min setting
         st.write("**Global Settings:**")
-        global_h_min = st.number_input(
-            "H_min (m) - Global minimum level for all segments",
-            value=0.0,
-            step=0.001,
-            format="%.3f",
+        global_h_min_cm = st.number_input(
+            "H_min (cm) - Global minimum level for all segments",
+            value=0,
+            step=1,
+            format="%d",
             key="global_h_min"
         )
+        global_h_min = global_h_min_cm / 100  # Convert to meters for calculations
 
         # Segment management
         st.write("**Rating Curve Segments:**")
@@ -1638,21 +1639,22 @@ class DashboardApp:
                 if i == 0:
                     # First segment starts from global H_min
                     segment['h_min'] = global_h_min
-                    st.write(f"H_min: {segment['h_min']:.3f} m (global setting)")
+                    st.write(f"H_min: {int(segment['h_min'] * 100)} cm (global setting)")
                 else:
                     # Subsequent segments start from previous segment's Hlim
                     prev_h_max = st.session_state.curve_segments[i-1]['h_max']
                     segment['h_min'] = prev_h_max
-                    st.write(f"H_min: {segment['h_min']:.3f} m (from prev segment)")
+                    st.write(f"H_min: {int(segment['h_min'] * 100)} cm (from prev segment)")
 
-                segment['h_max'] = st.number_input(
-                    "H_lim (m)",
-                    value=segment['h_max'],
-                    min_value=segment['h_min'] + 0.001,
-                    step=0.001,
-                    format="%.3f",
+                h_max_cm = st.number_input(
+                    "H_lim (cm)",
+                    value=int(segment['h_max'] * 100),
+                    min_value=int(segment['h_min'] * 100) + 1,
+                    step=1,
+                    format="%d",
                     key=f"h_max_{i}"
                 )
+                segment['h_max'] = h_max_cm / 100  # Convert back to meters for calculations
 
                 # Curve parameters in one row
                 st.write("**Curve parameters:**")
