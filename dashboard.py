@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Tuple, List, Dict
 import seaborn as sns
+from scipy.optimize import minimize
 
 # Page configuration
 st.set_page_config(
@@ -61,7 +62,7 @@ class BaseStationAnalyzer:
         """Get list of available stations (cached)."""
         if self._stations_cache is None:
             sql = """
-            SELECT DISTINCT s.station_id, s.name, s.river_id
+            SELECT DISTINCT s.station_id, s.name, s.river_id, s.altitude, s.drainage_area
             FROM stations s
             WHERE s.station_id IN (
                 SELECT DISTINCT station_id FROM timeseries_cota
@@ -237,6 +238,23 @@ class BaseStationAnalyzer:
         df = self._read_sql(sql, tuple(params), parse_dates=['date'])
         return df
 
+    def get_current_station_info(self) -> dict:
+        """Get metadata for the current station."""
+        if self._station_id is None:
+            return {}
+
+        station_info = self.stations[self.stations['station_id'] == self._station_id]
+        if station_info.empty:
+            return {}
+
+        station = station_info.iloc[0]
+        return {
+            'station_id': station['station_id'],
+            'name': station['name'],
+            'altitude': station['altitude'],
+            'drainage_area': station['drainage_area']
+        }
+
     def get_data_summary(self) -> dict:
         """Get summary statistics for current station data."""
         return {
@@ -345,20 +363,30 @@ class TimeseriesAnalyzer(BaseStationAnalyzer):
                 if curve['end_date'] < pd.Timestamp('2099-01-01') and curve['end_date'] <= plot_end:
                     ax.axvline(curve['end_date'], color='red', linestyle='--', alpha=0.7, linewidth=1)
 
-                # Horizontal lines for level limits (limited to date range)
+                # Horizontal lines for level/discharge limits (limited to date range)
                 line_start = max(curve['start_date'], plot_start)
                 line_end = min(curve['end_date'], plot_end)
 
-                ax.hlines(curve['h_min'], line_start, line_end,
+                if plot_type == "Level":
+                    # For level plots, show level limits
+                    y_min = curve['h_min']
+                    y_max = curve['h_max']
+                else:
+                    # For discharge plots, calculate discharge at h_min and h_max using rating curve equation
+                    # Q = a * (H - h0)^n
+                    y_min = curve['a_param'] * max(curve['h_min']/100 - curve['h0_param'], 0) ** curve['n_param']
+                    y_max = curve['a_param'] * max(curve['h_max']/100 - curve['h0_param'], 0) ** curve['n_param']
+                
+                y_pos = (y_max + y_min) / 2
+                ax.hlines(y_min, line_start, line_end,
                          colors='orange', linestyles=':', alpha=0.5, linewidth=1)
-                ax.hlines(curve['h_max'], line_start, line_end,
+                ax.hlines(y_max, line_start, line_end,
                          colors='orange', linestyles=':', alpha=0.5, linewidth=1)
 
-                # Add text annotation for segment below the line
+                # Add text annotation for segment
                 mid_date = line_start + (line_end - line_start) / 2
-                y_pos = curve['h_min']
                 ax.text(mid_date, y_pos, f"Seg {curve['segment_number']}",
-                       rotation=0, fontsize=8, ha='center', va='bottom', color='red')
+                       rotation=0, fontsize=8, ha='center', va='center_baseline', color='red')
 
         # Add measured points
         if not self.measured_data.empty:
@@ -874,6 +902,240 @@ class ProfileAnalyzer(BaseStationAnalyzer):
         return fig
 
 
+class RatingCurveAdjuster(BaseStationAnalyzer):
+    """Analyzer for interactive rating curve adjustment with multi-segment fitting."""
+
+    def __init__(self, db_path: str | Path):
+        super().__init__(db_path)
+        # Initialize session state for curve parameters if not exists
+        if 'curve_segments' not in st.session_state:
+            st.session_state.curve_segments = []
+        if 'measurement_filters' not in st.session_state:
+            st.session_state.measurement_filters = {}
+
+    def get_measurements_for_period(self, start_date: datetime, end_date: datetime) -> pd.DataFrame:
+        """Get stage-discharge measurements for the selected period."""
+        if self._station_id is None:
+            return pd.DataFrame()
+
+        sql = """
+        SELECT date, time, level, discharge, area, velocity, width, depth, consistency
+        FROM stage_discharge
+        WHERE station_id = ? AND date >= ? AND date <= ?
+        AND level IS NOT NULL AND discharge IS NOT NULL
+        ORDER BY level ASC
+        """
+
+        df = self._read_sql(sql, (
+            self._station_id,
+            start_date.strftime('%Y-%m-%d'),
+            end_date.strftime('%Y-%m-%d')
+        ), parse_dates=['date'])
+
+        if not df.empty:
+            # Add unique ID for each measurement
+            df['measurement_id'] = range(len(df))
+            # Convert level from cm to m for calculations
+            df['level_m'] = df['level'] / 100
+
+        return df
+
+    def calculate_default_hlim(self, measurements: pd.DataFrame) -> float:
+        """Calculate default Hlim as 10% higher than highest measurement (in cm)."""
+        if measurements.empty:
+            return 100.0  # Default fallback
+        return float(measurements['level'].max() * 1.1)
+
+    def fit_rating_curve(self, measurements: pd.DataFrame, h0: float, a_initial: float, n_initial: float) -> Tuple[float, float, float]:
+        """
+        Fit rating curve parameters using least squares optimization.
+        Returns (a, h0, n) parameters.
+        """
+        if measurements.empty or len(measurements) < 3:
+            return a_initial, h0, n_initial
+
+        # Filter measurements based on session state
+        active_mask = measurements['measurement_id'].apply(
+            lambda x: st.session_state.measurement_filters.get(x, True)
+        )
+        active_measurements = measurements[active_mask]
+
+        if len(active_measurements) < 3:
+            return a_initial, h0, n_initial
+
+        def objective(params):
+            a, n = params
+            h_adj = active_measurements['level_m'] - h0
+            # Prevent negative values
+            h_adj = np.maximum(h_adj, 0.001)
+            q_predicted = a * (h_adj ** n)
+            residuals = q_predicted - active_measurements['discharge']
+            return np.sum(residuals ** 2)
+
+        try:
+            result = minimize(
+                objective,
+                [a_initial, n_initial],
+                bounds=[(0.001, 1000), (0.1, 6.0)],
+                method='L-BFGS-B'
+            )
+            if result.success:
+                return float(result.x[0]), h0, float(result.x[1])
+        except:
+            pass
+
+        return a_initial, h0, n_initial
+
+    def calculate_curve_discharge(self, levels: np.ndarray, a: float, h0: float, n: float) -> np.ndarray:
+        """Calculate discharge values for given levels using rating curve equation."""
+        h_adj = levels - h0
+        h_adj = np.maximum(h_adj, 0.001)  # Prevent negative values
+        return a * (h_adj ** n)
+
+    def calculate_errors(self, measurements: pd.DataFrame, segments: List[Dict]) -> pd.DataFrame:
+        """Calculate percent errors for each measurement against fitted curves."""
+        if measurements.empty or not segments:
+            return pd.DataFrame()
+
+        results = []
+        for _, measurement in measurements.iterrows():
+            level_m = measurement['level_m']
+            actual_discharge = measurement['discharge']
+
+            # Find which segment applies to this measurement
+            predicted_discharge = None
+            for segment in segments:
+                if segment['h_min'] <= level_m <= segment['h_max']:
+                    predicted_discharge = self.calculate_curve_discharge(
+                        np.array([level_m]), segment['a'], segment['h0'], segment['n']
+                    )[0]
+                    break
+
+            if predicted_discharge is not None and actual_discharge > 0:
+                percent_error = ((predicted_discharge - actual_discharge) / actual_discharge) * 100
+                results.append({
+                    'measurement_id': measurement['measurement_id'],
+                    'date': measurement['date'],
+                    'level': measurement['level'],
+                    'level_m': level_m,
+                    'actual_discharge': actual_discharge,
+                    'predicted_discharge': predicted_discharge,
+                    'percent_error': percent_error,
+                    'active': st.session_state.measurement_filters.get(measurement['measurement_id'], True)
+                })
+
+        return pd.DataFrame(results)
+
+    def plot_stage_discharge(self, measurements: pd.DataFrame, segments: List[Dict],
+                           log_x: bool = False, log_y: bool = False,
+                           figsize: Tuple[int, int] = (10, 6)) -> plt.Figure:
+        """Create stage-discharge plot with fitted curves."""
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
+
+        if not measurements.empty:
+            # Plot active measurements
+            active_mask = measurements['measurement_id'].apply(
+                lambda x: st.session_state.measurement_filters.get(x, True)
+            )
+            active_measurements = measurements[active_mask]
+            inactive_measurements = measurements[~active_mask]
+
+            # Plot active measurements
+            if not active_measurements.empty:
+                ax.scatter(active_measurements['discharge'], active_measurements['level'],
+                          c='blue', alpha=0.7, s=40, label='Active Measurements', zorder=5)
+
+            # Plot inactive measurements
+            if not inactive_measurements.empty:
+                ax.scatter(inactive_measurements['discharge'], inactive_measurements['level'],
+                          c='lightgray', alpha=0.5, s=30, label='Inactive Measurements', zorder=3)
+
+            # Plot fitted curves
+            if segments:
+                colors = sns.color_palette("tab10", len(segments))
+                for i, segment in enumerate(segments):
+                    # Create smooth curve for this segment
+                    h_range = np.linspace(segment['h_min'], segment['h_max'], 100)
+                    q_range = self.calculate_curve_discharge(h_range, segment['a'], segment['h0'], segment['n'])
+
+                    ax.plot(q_range, h_range * 100, color=colors[i], linewidth=2,
+                           label=f"Segment {i+1}", zorder=4)
+
+        # Set scale
+        if log_x:
+            ax.set_xscale('log')
+        if log_y:
+            ax.set_yscale('log')
+
+        ax.set_xlabel('Discharge (m³/s)')
+        ax.set_ylabel('Level (cm)')
+        ax.set_title(f'Station {self._station_id} - Stage-Discharge Relationship')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+
+        return fig
+
+    def plot_error_vs_level(self, error_data: pd.DataFrame, figsize: Tuple[int, int] = (8, 6)) -> plt.Figure:
+        """Plot percent errors vs level."""
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
+
+        if not error_data.empty:
+            # Separate active and inactive measurements
+            active_data = error_data[error_data['active']]
+            inactive_data = error_data[~error_data['active']]
+
+            if not active_data.empty:
+                ax.scatter(active_data['level'], active_data['percent_error'],
+                          c='blue', alpha=0.7, s=40, label='Active')
+
+            if not inactive_data.empty:
+                ax.scatter(inactive_data['level'], inactive_data['percent_error'],
+                          c='lightgray', alpha=0.5, s=30, label='Inactive')
+
+            # Add zero line
+            ax.axhline(y=0, color='red', linestyle='--', alpha=0.7)
+
+        ax.set_xlabel('Level (cm)')
+        ax.set_ylabel('Percent Error (%)')
+        ax.set_title('Rating Curve Errors vs Level')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+
+        return fig
+
+    def plot_error_vs_time(self, error_data: pd.DataFrame, figsize: Tuple[int, int] = (8, 6)) -> plt.Figure:
+        """Plot percent errors vs time."""
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
+
+        if not error_data.empty:
+            # Separate active and inactive measurements
+            active_data = error_data[error_data['active']]
+            inactive_data = error_data[~error_data['active']]
+
+            if not active_data.empty:
+                ax.scatter(active_data['date'], active_data['percent_error'],
+                          c='blue', alpha=0.7, s=40, label='Active')
+
+            if not inactive_data.empty:
+                ax.scatter(inactive_data['date'], inactive_data['percent_error'],
+                          c='lightgray', alpha=0.5, s=30, label='Inactive')
+
+            # Add zero line
+            ax.axhline(y=0, color='red', linestyle='--', alpha=0.7)
+
+        ax.set_xlabel('Date')
+        ax.set_ylabel('Percent Error (%)')
+        ax.set_title('Rating Curve Errors vs Time')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+
+        return fig
+
+
 class DashboardApp:
     """Main Streamlit dashboard application using composition."""
 
@@ -882,12 +1144,15 @@ class DashboardApp:
         self.timeseries_analyzer = TimeseriesAnalyzer(db_path)
         self.scatter_analyzer = ScatterAnalyzer(db_path)
         self.profile_analyzer = ProfileAnalyzer(db_path)
+        self.curve_adjuster = RatingCurveAdjuster(db_path)
 
-    def _sync_analyzers(self, station_id: int, start_date: Optional[datetime], end_date: Optional[datetime]):
+    def _sync_analyzers(self, station_id: int, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None):
         """Sync station and date settings across all analyzers."""
         self.timeseries_analyzer.set_station(station_id, start_date, end_date)
-        self.scatter_analyzer.set_station(station_id, start_date, end_date)
-        self.profile_analyzer.set_station(station_id, start_date, end_date)
+        # Other analyzers don't use date filtering - only set station
+        self.scatter_analyzer.set_station(station_id, None, None)
+        self.profile_analyzer.set_station(station_id, None, None)
+        self.curve_adjuster.set_station(station_id, None, None)
 
     def run(self):
         """Run the Streamlit dashboard."""
@@ -915,23 +1180,29 @@ class DashboardApp:
 
             station_id = station_options[selected_station]
 
-            # Date range selection
-            st.sidebar.subheader("Date Range")
-
-            col1, col2 = st.sidebar.columns(2)
-            with col1:
-                start_date = st.date_input("Start Date", value=None,
-                                         min_value=datetime(1900, 1, 1),
-                                         max_value=datetime(2099, 12, 31))
-            with col2:
-                end_date = st.date_input("End Date", value=None,
-                                       min_value=datetime(1900, 1, 1),
-                                       max_value=datetime(2099, 12, 31))
-
-            # Sync both analyzers
+            # Sync analyzers with just station (no date filtering for sidebar)
             with st.spinner("Loading station data..."):
-                self._sync_analyzers(station_id, start_date, end_date)
+                self._sync_analyzers(station_id)
                 summary = self.timeseries_analyzer.get_data_summary()
+                station_info = self.timeseries_analyzer.get_current_station_info()
+
+            # Display station information
+            if station_info:
+                st.subheader("Station Information")
+                col1, col2, col3, col4 = st.columns(4)
+
+                with col1:
+                    st.metric("Station", f"{station_info['station_id']}")
+                with col2:
+                    st.metric("Name", station_info['name'] if station_info['name'] else 'N/A')
+                with col3:
+                    altitude_val = station_info['altitude']
+                    altitude_text = f"{altitude_val:.1f} m" if altitude_val is not None else 'N/A'
+                    st.metric("Altitude", altitude_text)
+                with col4:
+                    drainage_val = station_info['drainage_area']
+                    drainage_text = f"{drainage_val:.1f} km²" if drainage_val is not None else 'N/A'
+                    st.metric("Drainage Area", drainage_text)
 
             # Display data summary
             st.subheader("Data Summary")
@@ -947,7 +1218,7 @@ class DashboardApp:
                 st.metric("Rating Curves", summary['rating_curves'])
 
             # Main content in tabs
-            tab1, tab2, tab3 = st.tabs(["📈 Timeseries Analysis", "📊 Scatter Analysis", "🏔️ Vertical Profiles"])
+            tab1, tab2, tab3, tab4 = st.tabs(["📈 Timeseries Analysis", "📊 Scatter Analysis", "🏔️ Vertical Profiles", "⚙️ Rating Curve Adjustment"])
 
             with tab1:
                 self._render_timeseries_tab()
@@ -958,12 +1229,34 @@ class DashboardApp:
             with tab3:
                 self._render_profile_tab()
 
+            with tab4:
+                self._render_adjustment_tab()
+
         except Exception as e:
             st.error(f"Error loading data: {e}")
 
     def _render_timeseries_tab(self):
         """Render the timeseries analysis tab."""
         st.subheader("Timeseries with Rating Curve Indicators")
+
+        # Date range selection (only for timeseries tab)
+        st.subheader("Date Range Filter")
+        col1, col2 = st.columns(2)
+        with col1:
+            start_date = st.date_input("Start Date", value=None,
+                                     min_value=datetime(1900, 1, 1),
+                                     max_value=datetime(2099, 12, 31),
+                                     key="timeseries_start_date")
+        with col2:
+            end_date = st.date_input("End Date", value=None,
+                                   min_value=datetime(1900, 1, 1),
+                                   max_value=datetime(2099, 12, 31),
+                                   key="timeseries_end_date")
+
+        # Update timeseries analyzer with date filter
+        current_station = self.timeseries_analyzer._station_id
+        if current_station:
+            self.timeseries_analyzer.set_station(current_station, start_date, end_date)
 
         # Plot type selection
         plot_type = st.radio(

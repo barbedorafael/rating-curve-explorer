@@ -57,10 +57,9 @@ def get_level_data(conn, station_id, start_date, end_date, h_min, h_max):
 def calculate_discharge(level, h0, a, n):
     """Calculate discharge using rating curve equation Q = a * (H - H0)^n."""
     # Ensure H > H0 to avoid negative or complex values
-    h_diff = (level/100 - h0) # convert level to m
+    h_diff = max(level/100 - h0, 0) # convert level to m
 
-    # Only calculate for valid positive differences
-    discharge = np.where(h_diff > 0, (a * h_diff ** n), 0) # zero discharge?
+    discharge = a * h_diff ** n
     discharge = (discharge*100).astype(int)/100 # truncate to 2 decimal places
 
     return discharge
