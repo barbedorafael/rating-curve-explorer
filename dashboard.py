@@ -1508,6 +1508,315 @@ class DashboardApp:
             else:
                 st.info("Select rating curves to filter and display vertical profiles")
 
+    def _render_adjustment_tab(self):
+        """Render the rating curve adjustment tab."""
+        st.subheader("Interactive Rating Curve Adjustment")
+
+        # Three-column layout
+        col1, col2, col3 = st.columns([1, 2, 1])
+
+        with col1:
+            self._render_adjustment_controls()
+
+        with col2:
+            self._render_adjustment_plots()
+
+        with col3:
+            self._render_error_analysis()
+
+    def _render_adjustment_controls(self):
+        """Render the left panel with period selection and parameter controls."""
+        st.subheader("Period & Parameters")
+
+        # Period selection
+        st.write("**Select Measurement Period:**")
+
+        col_start, col_end = st.columns(2)
+        with col_start:
+            start_date = st.date_input(
+                "Start Date",
+                value=datetime(2020, 1, 1),
+                key="adj_start_date"
+            )
+        with col_end:
+            end_date = st.date_input(
+                "End Date",
+                value=datetime(2024, 12, 31),
+                key="adj_end_date"
+            )
+
+        # Load measurements for the period
+        measurements = self.curve_adjuster.get_measurements_for_period(start_date, end_date)
+
+        if measurements.empty:
+            st.warning("No measurements found for selected period")
+            return
+
+        st.metric("Measurements Found", len(measurements))
+
+        # Initialize measurement filters if not exists
+        for measurement_id in measurements['measurement_id']:
+            if measurement_id not in st.session_state.measurement_filters:
+                st.session_state.measurement_filters[measurement_id] = True
+
+        # Calculate default Hlim
+        default_hlim = self.curve_adjuster.calculate_default_hlim(measurements)
+
+        # Segment management
+        st.write("**Rating Curve Segments:**")
+
+        # Initialize segments if empty
+        if not st.session_state.curve_segments:
+            st.session_state.curve_segments = [{
+                'segment_num': 1,
+                'h_min': measurements['level_m'].min() if not measurements.empty else 0.0,
+                'h_max': default_hlim / 100,  # Convert to meters
+                'h0': 0.0,
+                'a': 1.0,
+                'n': 1.5
+            }]
+
+        # Display segments
+        segments_to_remove = []
+        for i, segment in enumerate(st.session_state.curve_segments):
+            with st.expander(f"Segment #{segment['segment_num']}", expanded=True):
+
+                # Hlim input
+                if i == 0:
+                    # First segment starts from minimum measurement
+                    st.write(f"H_min: {segment['h_min']:.3f} m (from data)")
+                else:
+                    # Subsequent segments start from previous segment's Hlim
+                    prev_h_max = st.session_state.curve_segments[i-1]['h_max']
+                    segment['h_min'] = prev_h_max
+                    st.write(f"H_min: {segment['h_min']:.3f} m (from prev segment)")
+
+                segment['h_max'] = st.number_input(
+                    "H_lim (m)",
+                    value=segment['h_max'],
+                    min_value=segment['h_min'] + 0.001,
+                    step=0.001,
+                    format="%.3f",
+                    key=f"h_max_{i}"
+                )
+
+                # Curve parameters in one row
+                st.write("**Curve parameters:**")
+                col_h0, col_a, col_n = st.columns(3)
+
+                with col_h0:
+                    segment['h0'] = st.number_input(
+                        "H0 (m)",
+                        value=segment['h0'],
+                        step=0.001,
+                        format="%.3f",
+                        key=f"h0_{i}"
+                    )
+
+                with col_a:
+                    segment['a'] = st.number_input(
+                        "a",
+                        value=segment['a'],
+                        min_value=0.001,
+                        step=0.1,
+                        format="%.3f",
+                        key=f"a_{i}"
+                    )
+
+                with col_n:
+                    segment['n'] = st.number_input(
+                        "n",
+                        value=segment['n'],
+                        min_value=0.1,
+                        max_value=6.0,
+                        step=0.1,
+                        format="%.2f",
+                        key=f"n_{i}"
+                    )
+
+                # Remove segment button (not for first segment)
+                if i > 0:
+                    if st.button(f"Remove Segment {segment['segment_num']}", key=f"remove_{i}"):
+                        segments_to_remove.append(i)
+
+        # Remove segments marked for deletion
+        for i in reversed(segments_to_remove):
+            del st.session_state.curve_segments[i]
+            st.rerun()
+
+        # Add new segment button
+        if st.button("Add New Segment"):
+            last_segment = st.session_state.curve_segments[-1]
+            new_segment = {
+                'segment_num': len(st.session_state.curve_segments) + 1,
+                'h_min': last_segment['h_max'],
+                'h_max': last_segment['h_max'] + 0.5,  # 50 cm higher
+                'h0': 0.0,
+                'a': 1.0,
+                'n': 1.5
+            }
+            st.session_state.curve_segments.append(new_segment)
+            st.rerun()
+
+        # Global adjust button
+        st.write("---")
+        if st.button("🔧 Adjust All Curves", type="primary"):
+            all_fitted = True
+            fitted_results = []
+
+            for i, segment in enumerate(st.session_state.curve_segments):
+                # Filter measurements for this segment
+                segment_measurements = measurements[
+                    (measurements['level_m'] >= segment['h_min']) &
+                    (measurements['level_m'] <= segment['h_max'])
+                ]
+
+                if not segment_measurements.empty:
+                    # Fit the curve
+                    a_fitted, h0_fitted, n_fitted = self.curve_adjuster.fit_rating_curve(
+                        segment_measurements, segment['h0'], segment['a'], segment['n']
+                    )
+
+                    # Update the segment
+                    segment['a'] = a_fitted
+                    segment['h0'] = h0_fitted
+                    segment['n'] = n_fitted
+
+                    fitted_results.append(f"Seg {segment['segment_num']}: a={a_fitted:.3f}, h0={h0_fitted:.3f}, n={n_fitted:.2f}")
+                else:
+                    fitted_results.append(f"Seg {segment['segment_num']}: No measurements in range")
+                    all_fitted = False
+
+            if all_fitted:
+                st.success("All curves fitted successfully!")
+            else:
+                st.warning("Some segments could not be fitted (no measurements in range)")
+
+            # Show fitting results
+            for result in fitted_results:
+                st.write(f"• {result}")
+
+            st.rerun()
+
+    def _render_adjustment_plots(self):
+        """Render the middle panel with stage-discharge plot and measurements table."""
+        st.subheader("Stage-Discharge Relationship")
+
+        # Get current measurements
+        start_date = st.session_state.get('adj_start_date', datetime(2020, 1, 1))
+        end_date = st.session_state.get('adj_end_date', datetime(2024, 12, 31))
+        measurements = self.curve_adjuster.get_measurements_for_period(start_date, end_date)
+
+        if measurements.empty:
+            st.warning("No measurements to display")
+            return
+
+        # Plot controls
+        col_log_x, col_log_y = st.columns(2)
+        with col_log_x:
+            log_x = st.checkbox("Log X-axis", value=False)
+        with col_log_y:
+            log_y = st.checkbox("Log Y-axis", value=False)
+
+        # Create plot
+        if st.session_state.curve_segments:
+            fig = self.curve_adjuster.plot_stage_discharge(
+                measurements, st.session_state.curve_segments, log_x, log_y
+            )
+            st.pyplot(fig)
+
+        # Measurements table with toggles
+        st.subheader("Measurements")
+
+        # Sorting options
+        sort_option = st.radio(
+            "Sort by:",
+            options=["Date", "Level"],
+            horizontal=True,
+            key="meas_sort"
+        )
+
+        st.write("Toggle measurements on/off for fitting:")
+
+        # Create editable dataframe
+        display_df = measurements[['date', 'level', 'discharge', 'measurement_id']].copy()
+        display_df['Active'] = display_df['measurement_id'].apply(
+            lambda x: st.session_state.measurement_filters.get(x, True)
+        )
+
+        # Sort the dataframe
+        if sort_option == "Date":
+            display_df = display_df.sort_values('date')
+        else:  # Sort by Level
+            display_df = display_df.sort_values('level')
+
+        # Column headers
+        col_check, col_date, col_level, col_discharge = st.columns([1, 2, 2, 2])
+        with col_check:
+            st.write("**Active**")
+        with col_date:
+            st.write("**Date**")
+        with col_level:
+            st.write("**Level (cm)**")
+        with col_discharge:
+            st.write("**Discharge (m³/s)**")
+
+        # Display table with checkboxes
+        for _, row in display_df.iterrows():
+            col_check, col_date, col_level, col_discharge = st.columns([1, 2, 2, 2])
+
+            with col_check:
+                new_state = st.checkbox(
+                    "",
+                    value=row['Active'],
+                    key=f"meas_toggle_{row['measurement_id']}"
+                )
+                st.session_state.measurement_filters[row['measurement_id']] = new_state
+
+            with col_date:
+                st.write(row['date'].strftime('%Y-%m-%d'))
+
+            with col_level:
+                st.write(f"{row['level']:.1f}")
+
+            with col_discharge:
+                st.write(f"{row['discharge']:.2f}")
+
+    def _render_error_analysis(self):
+        """Render the right panel with error visualization."""
+        st.subheader("Error Analysis")
+
+        # Get current measurements and calculate errors
+        start_date = st.session_state.get('adj_start_date', datetime(2020, 1, 1))
+        end_date = st.session_state.get('adj_end_date', datetime(2024, 12, 31))
+        measurements = self.curve_adjuster.get_measurements_for_period(start_date, end_date)
+
+        if measurements.empty or not st.session_state.curve_segments:
+            st.warning("No data for error analysis")
+            return
+
+        # Calculate errors
+        error_data = self.curve_adjuster.calculate_errors(measurements, st.session_state.curve_segments)
+
+        if error_data.empty:
+            st.warning("No errors to display")
+            return
+
+        # Error statistics
+        active_errors = error_data[error_data['active']]['percent_error']
+        if not active_errors.empty:
+            st.metric("Mean Abs Error (%)", f"{active_errors.abs().mean():.1f}")
+            st.metric("RMSE (%)", f"{np.sqrt((active_errors**2).mean()):.1f}")
+            st.metric("Active Points", len(active_errors))
+
+        # Error vs Level plot
+        fig1 = self.curve_adjuster.plot_error_vs_level(error_data, figsize=(6, 4))
+        st.pyplot(fig1)
+
+        # Error vs Time plot
+        fig2 = self.curve_adjuster.plot_error_vs_time(error_data, figsize=(6, 4))
+        st.pyplot(fig2)
+
 
 def main():
     """Entry point for the dashboard."""
