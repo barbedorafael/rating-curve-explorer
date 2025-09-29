@@ -1,10 +1,8 @@
 import sqlite3
 import pandas as pd
 
-from scipy.optimize import least_squares
-
 class HydroDB:
-   def __init__(self, db_path, station_id):
+    def __init__(self, db_path, station_id):
         """
         Initialize DB.
 
@@ -59,10 +57,12 @@ class HydroDB:
         # Convert date strings to datetime objects
         df['datetime'] = pd.to_datetime(df['date'] + ' ' + df['time'])
 
-        self.stage_discharge_data = {
-            'dates': df['datetime'].values,
-            'levels': df['level'].values,  # cm
-            'discharges': df['discharge'].values  # m3/s
-        }
+        df['level'] /= 100 # Convert to meters
+        
+        # self.stage_discharge_data = {
+        #     'dates': df['datetime'].values,
+        #     'levels': df['level'].values,  # cm
+        #     'discharges': df['discharge'].values  # m3/s
+        # }
 
-        return self.stage_discharge_data
+        return df

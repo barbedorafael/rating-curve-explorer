@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.optimize import minimize, differential_evolution, least_squares
-from scipy.stats import huber
+from scipy.special import huber
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Callable
@@ -53,13 +53,15 @@ class SegmentedPowerCurveFitter:
         self.x_max = self.x_data.max()
         
     def create_objective_function(self, 
-                                  continuity_weight=100,
+                                  continuity_weight=1000,
                                   max_error_threshold=0.15,
                                   max_error_weight=10,
                                   target_range=(0.3, 0.7),
                                   range_weight=1,
                                   outlier_method='huber',
-                                  outlier_threshold=1.0):
+                                  outlier_threshold=1.0,
+                                  min_segment_range=0.1,
+                                  min_range_weight=10000):
         """
         Create a custom objective function with various criteria
         
@@ -79,6 +81,10 @@ class SegmentedPowerCurveFitter:
             Method for handling outliers ('huber', 'soft_l1', 'cauchy')
         outlier_threshold: float
             Threshold for outlier detection
+        min_segment_range: float or None
+            Minimum x-range each segment must cover (prevents tiny segments)
+        min_range_weight: float
+            Weight for penalty when segment x-range is too small
         """
         
         def objective(params, n_segments, return_components=False):
@@ -92,12 +98,12 @@ class SegmentedPowerCurveFitter:
                         y_fitted[i] = seg.evaluate_safe(x)
                         break
             
-            # 1. Base fitting error with outlier handling
+            # Base fitting error with outlier handling
             residuals = self.y_data - y_fitted
             rel_errors = np.abs(residuals) / (np.abs(self.y_data) + 1e-10)
             
             if outlier_method == 'huber':
-                base_loss = huber.huber(outlier_threshold, residuals).sum()
+                base_loss = huber(outlier_threshold, residuals).sum()
             elif outlier_method == 'soft_l1':
                 base_loss = np.sum(2 * (np.sqrt(1 + (residuals/outlier_threshold)**2) - 1))
             elif outlier_method == 'cauchy':
@@ -105,7 +111,7 @@ class SegmentedPowerCurveFitter:
             else:
                 base_loss = np.sum(residuals**2)
             
-            # 2. Continuity penalty
+            # Continuity penalty
             continuity_penalty = 0
             for i in range(len(segments) - 1):
                 x_break = segments[i].x_end
@@ -115,13 +121,13 @@ class SegmentedPowerCurveFitter:
                 if rel_diff > 0.05:  # 5% threshold
                     continuity_penalty += (rel_diff - 0.05)**2
             
-            # 3. Maximum error penalty
+            # Maximum error penalty
             max_error_penalty = 0
             max_rel_error = np.max(rel_errors)
             if max_rel_error > max_error_threshold:
                 max_error_penalty = (max_rel_error - max_error_threshold)**2
             
-            # 4. Target range penalty (example: penalize if certain range not well fitted)
+            # Target range penalty
             range_penalty = 0
             if target_range:
                 x_range_min = self.x_min + target_range[0] * (self.x_max - self.x_min)
@@ -131,11 +137,20 @@ class SegmentedPowerCurveFitter:
                     range_errors = rel_errors[mask]
                     range_penalty = np.mean(range_errors**2)
             
+            # Minimum segment range penalty
+            min_range_penalty = 0
+            for seg in segments:
+                segment_range = seg.x_end - seg.x_start
+                if segment_range < min_segment_range:
+                    # Quadratic penalty for segments that are too narrow
+                    min_range_penalty += ((min_segment_range - segment_range) / min_segment_range)**2
+            
             # Total objective
             total = (base_loss + 
                     continuity_weight * continuity_penalty +
                     max_error_weight * max_error_penalty +
-                    range_weight * range_penalty)
+                    range_weight * range_penalty +
+                    min_range_weight * min_range_penalty)
             
             if return_components:
                 return {
@@ -143,7 +158,8 @@ class SegmentedPowerCurveFitter:
                     'base_loss': base_loss,
                     'continuity_penalty': continuity_penalty,
                     'max_error_penalty': max_error_penalty,
-                    'range_penalty': range_penalty
+                    'range_penalty': range_penalty,
+                    'min_range_penalty': min_range_penalty
                 }
             
             return total
@@ -204,7 +220,7 @@ class SegmentedPowerCurveFitter:
             # Simple initial guesses
             a = np.mean(self.y_data)
             x0 = self.x_min
-            n = 1.0
+            n = 1.5
             params.extend([a, x0, n])
         
         return np.array(params)
@@ -223,15 +239,15 @@ class SegmentedPowerCurveFitter:
         
         for i in range(n_param_segments):
             # a: coefficient
-            bounds.append((None, None))
+            bounds.append((1, 1e4))
             # x0: offset
-            bounds.append((None, None))
-            # n: power (typically positive)
-            bounds.append((0.1, 10))
+            bounds.append((0.01, 100))
+            # n: power
+            bounds.append((1.2, 5))
         
         return bounds
     
-    def fit_fixed_segments(self, n_segments, method='differential_evolution', **obj_kwargs):
+    def fit_segments(self, n_segments, **obj_kwargs):
         """
         Fit curve with fixed number of segments
         
@@ -239,8 +255,6 @@ class SegmentedPowerCurveFitter:
         -----------
         n_segments: int
             Number of segments (1 to 5)
-        method: str
-            Optimization method ('differential_evolution', 'L-BFGS-B', 'trust-constr')
         obj_kwargs: dict
             Arguments for objective function creation
         """
@@ -248,32 +262,15 @@ class SegmentedPowerCurveFitter:
         initial_guess = self.get_initial_guess(n_segments)
         bounds = self.get_bounds(n_segments)
         
-        if method == 'differential_evolution':
-            result = differential_evolution(
-                lambda p: objective(p, n_segments),
-                bounds,
-                seed=42,
-                maxiter=1000,
-                popsize=15,
-                atol=1e-10,
-                tol=1e-10
-            )
-        elif method == 'L-BFGS-B':
-            result = minimize(
-                lambda p: objective(p, n_segments),
-                initial_guess,
-                method='L-BFGS-B',
-                bounds=bounds
-            )
-        elif method == 'trust-constr':
-            result = minimize(
-                lambda p: objective(p, n_segments),
-                initial_guess,
-                method='trust-constr',
-                bounds=bounds
-            )
-        else:
-            raise ValueError(f"Unknown method: {method}")
+        result = differential_evolution(
+            lambda p: objective(p, n_segments),
+            bounds,
+            seed=42,
+            maxiter=1000,
+            popsize=15,
+            atol=1e-10,
+            tol=1e-10
+        )
         
         segments = self.params_to_segments(result.x, n_segments)
         components = objective(result.x, n_segments, return_components=True)
@@ -286,62 +283,6 @@ class SegmentedPowerCurveFitter:
             'success': result.success,
             'n_segments': n_segments
         }
-    
-    def optimize_segments(self, max_segments=5, method='differential_evolution', 
-                         use_bic=True, **obj_kwargs):
-        """
-        Optimize both number of segments and their parameters
-        
-        Parameters:
-        -----------
-        max_segments: int
-            Maximum number of segments to consider
-        method: str
-            Optimization method
-        use_bic: bool
-            Use BIC criterion for model selection
-        """
-        results = []
-        
-        for n_seg in range(1, max_segments + 1):
-            print(f"Fitting with {n_seg} segments...")
-            try:
-                result = self.fit_fixed_segments(n_seg, method, **obj_kwargs)
-                
-                # Calculate fit quality metrics
-                segments = result['segments']
-                y_fitted = np.zeros_like(self.y_data)
-                for i, x in enumerate(self.x_data):
-                    for seg in segments:
-                        if seg.x_start <= x <= seg.x_end:
-                            y_fitted[i] = seg.evaluate_safe(x)
-                            break
-                
-                residuals = self.y_data - y_fitted
-                sse = np.sum(residuals**2)
-                n_params = len(result['params'])
-                n_data = len(self.x_data)
-                
-                # BIC for model selection
-                if use_bic:
-                    bic = n_data * np.log(sse / n_data) + n_params * np.log(n_data)
-                    result['bic'] = bic
-                
-                result['sse'] = sse
-                result['rmse'] = np.sqrt(sse / n_data)
-                results.append(result)
-                
-            except Exception as e:
-                print(f"Failed for {n_seg} segments: {e}")
-                continue
-        
-        # Select best model
-        if use_bic:
-            best_idx = np.argmin([r['bic'] for r in results])
-        else:
-            best_idx = np.argmin([r['objective'] for r in results])
-        
-        return results[best_idx], results
     
     def plot_results(self, result, show_components=True):
         """Visualize the fitted curve and data"""
@@ -407,4 +348,3 @@ class SegmentedPowerCurveFitter:
             ax2.grid(True, alpha=0.3)
         
         plt.tight_layout()
-        return fig
