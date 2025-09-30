@@ -43,7 +43,7 @@ class SegmentedPowerCurveFitter:
         self.x_max = self.x_data.max()
         
     def create_objective_function(self, 
-                                  loss_weight=10,
+                                  loss_weight=100,
                                   continuity_threshold=0.05,
                                   continuity_weight=10,
                                   min_segment_range=0.1,
@@ -57,7 +57,7 @@ class SegmentedPowerCurveFitter:
         -----------
         loss_weight: float
             Weight for loss function penalty (MPE)
-                continuity_weight: float
+        continuity_weight: float
             Weight for continuity violation penalty
         outlier_method: str
             Method for handling outliers ('huber', 'soft_l1', 'cauchy')
