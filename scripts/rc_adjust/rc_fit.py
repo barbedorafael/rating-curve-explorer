@@ -1,10 +1,8 @@
 import numpy as np
-from scipy.optimize import minimize, differential_evolution, least_squares
+from scipy.optimize import differential_evolution
 from scipy.special import huber
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
-from typing import List, Tuple, Optional, Callable
-import warnings
 
 @dataclass
 class Segment:
@@ -18,14 +16,6 @@ class Segment:
     def evaluate(self, x):
         """Evaluate the power function at given x values"""
         return self.a * (x - self.x0) ** self.n
-    
-    def evaluate_safe(self, x):
-        """Evaluate with handling for negative base with non-integer power"""
-        base = x - self.x0
-        if np.any(base <= 0) and not float(self.n).is_integer():
-            # Use complex arithmetic and take real part
-            return np.real(self.a * np.power(base + 0j, self.n))
-        return self.a * np.power(base, self.n)
 
 class SegmentedPowerCurveFitter:
     def __init__(self, x_data, y_data, last_segment_params=None):
@@ -53,30 +43,22 @@ class SegmentedPowerCurveFitter:
         self.x_max = self.x_data.max()
         
     def create_objective_function(self, 
-                                  continuity_weight=1000,
-                                  max_error_threshold=0.15,
-                                  max_error_weight=10,
-                                  target_range=(0.3, 0.7),
-                                  range_weight=1,
-                                  outlier_method='huber',
-                                  outlier_threshold=1.0,
+                                  loss_weight=10,
+                                  continuity_threshold=0.05,
+                                  continuity_weight=10,
                                   min_segment_range=0.1,
-                                  min_range_weight=10000):
+                                  min_range_weight=1,
+                                  min_points_per_segment=2,
+                                  min_points_weight=1):
         """
         Create a custom objective function with various criteria
         
         Parameters:
         -----------
-        continuity_weight: float
+        loss_weight: float
+            Weight for loss function penalty (MPE)
+                continuity_weight: float
             Weight for continuity violation penalty
-        max_error_threshold: float
-            Maximum allowed relative error (e.g., 0.15 for 15%)
-        max_error_weight: float
-            Weight for maximum error violation
-        target_range: tuple
-            Target range for specific x values (as fraction of x range)
-        range_weight: float
-            Weight for target range penalty
         outlier_method: str
             Method for handling outliers ('huber', 'soft_l1', 'cauchy')
         outlier_threshold: float
@@ -85,6 +67,10 @@ class SegmentedPowerCurveFitter:
             Minimum x-range each segment must cover (prevents tiny segments)
         min_range_weight: float
             Weight for penalty when segment x-range is too small
+        min_points_per_segment: int
+            Minimum number of data points each segment must cover
+        min_points_weight: float
+            Weight for penalty when segments have too few points
         """
         
         def objective(params, n_segments, return_components=False):
@@ -95,47 +81,23 @@ class SegmentedPowerCurveFitter:
             for i, x in enumerate(self.x_data):
                 for seg in segments:
                     if seg.x_start <= x <= seg.x_end:
-                        y_fitted[i] = seg.evaluate_safe(x)
+                        y_fitted[i] = seg.evaluate(x)
                         break
             
-            # Base fitting error with outlier handling
+            # Loss penalty
             residuals = self.y_data - y_fitted
             rel_errors = np.abs(residuals) / (np.abs(self.y_data) + 1e-10)
-            
-            if outlier_method == 'huber':
-                base_loss = huber(outlier_threshold, residuals).sum()
-            elif outlier_method == 'soft_l1':
-                base_loss = np.sum(2 * (np.sqrt(1 + (residuals/outlier_threshold)**2) - 1))
-            elif outlier_method == 'cauchy':
-                base_loss = np.sum(outlier_threshold**2 * np.log(1 + (residuals/outlier_threshold)**2))
-            else:
-                base_loss = np.sum(residuals**2)
+            loss_penalty = np.nanmean(rel_errors)
             
             # Continuity penalty
             continuity_penalty = 0
             for i in range(len(segments) - 1):
                 x_break = segments[i].x_end
-                val1 = segments[i].evaluate_safe(x_break)
-                val2 = segments[i+1].evaluate_safe(x_break)
+                val1 = segments[i].evaluate(x_break)
+                val2 = segments[i+1].evaluate(x_break)
                 rel_diff = abs(val1 - val2) / (abs(val1) + 1e-10)
-                if rel_diff > 0.05:  # 5% threshold
-                    continuity_penalty += (rel_diff - 0.05)**2
-            
-            # Maximum error penalty
-            max_error_penalty = 0
-            max_rel_error = np.max(rel_errors)
-            if max_rel_error > max_error_threshold:
-                max_error_penalty = (max_rel_error - max_error_threshold)**2
-            
-            # Target range penalty
-            range_penalty = 0
-            if target_range:
-                x_range_min = self.x_min + target_range[0] * (self.x_max - self.x_min)
-                x_range_max = self.x_min + target_range[1] * (self.x_max - self.x_min)
-                mask = (self.x_data >= x_range_min) & (self.x_data <= x_range_max)
-                if np.any(mask):
-                    range_errors = rel_errors[mask]
-                    range_penalty = np.mean(range_errors**2)
+                if rel_diff > continuity_threshold:  # 5% threshold
+                    continuity_penalty += (rel_diff - continuity_threshold)**2
             
             # Minimum segment range penalty
             min_range_penalty = 0
@@ -145,21 +107,33 @@ class SegmentedPowerCurveFitter:
                     # Quadratic penalty for segments that are too narrow
                     min_range_penalty += ((min_segment_range - segment_range) / min_segment_range)**2
             
+            # Minimum points per segment penalty
+            min_points_penalty = 0
+            segment_point_counts = []
+            for seg in segments:
+                # Count points in this segment
+                points_in_segment = np.sum((self.x_data >= seg.x_start) & 
+                                          (self.x_data <= seg.x_end))
+                segment_point_counts.append(points_in_segment)
+                
+                if points_in_segment < min_points_per_segment:
+                    # Penalty for having too few points
+                    min_points_penalty += 1
+            
             # Total objective
-            total = (base_loss + 
+            total = (loss_weight * loss_penalty + 
                     continuity_weight * continuity_penalty +
-                    max_error_weight * max_error_penalty +
-                    range_weight * range_penalty +
-                    min_range_weight * min_range_penalty)
+                    min_range_weight * min_range_penalty +
+                    min_points_weight * min_points_penalty)
             
             if return_components:
                 return {
                     'total': total,
-                    'base_loss': base_loss,
+                    'base_loss': loss_penalty,
                     'continuity_penalty': continuity_penalty,
-                    'max_error_penalty': max_error_penalty,
-                    'range_penalty': range_penalty,
-                    'min_range_penalty': min_range_penalty
+                    'min_range_penalty': min_range_penalty,
+                    'min_points_penalty': min_points_penalty,
+                    'segment_point_counts': segment_point_counts
                 }
             
             return total
@@ -237,11 +211,11 @@ class SegmentedPowerCurveFitter:
         # Bounds for segment parameters
         n_param_segments = n_segments - 1 if self.last_segment_params else n_segments
         
-        for i in range(n_param_segments):
+        for _ in range(n_param_segments):
             # a: coefficient
             bounds.append((1, 1e4))
             # x0: offset
-            bounds.append((0.01, 100))
+            bounds.append((-100, self.x_min*0.9))
             # n: power
             bounds.append((1.2, 5))
         
@@ -267,7 +241,7 @@ class SegmentedPowerCurveFitter:
             bounds,
             seed=42,
             maxiter=1000,
-            popsize=15,
+            popsize=50,
             atol=1e-10,
             tol=1e-10
         )
@@ -284,67 +258,96 @@ class SegmentedPowerCurveFitter:
             'n_segments': n_segments
         }
     
-    def plot_results(self, result, show_components=True):
-        """Visualize the fitted curve and data"""
-        fig, axes = plt.subplots(2 if show_components else 1, 1, 
-                                 figsize=(10, 8 if show_components else 4))
-        
-        if not show_components:
-            axes = [axes]
-        
-        # Main plot
-        ax = axes[0]
-        ax.scatter(self.x_data, self.y_data, alpha=0.6, label='Data')
-        
-        # Plot fitted curve
+    def plot_results(self, result, show_components=True, figsize=(12, 8)):
+        """
+        Visualize the fitted curve and data with enhanced plotting style.
+
+        Parameters
+        ----------
+        result : dict
+            Result from fit_segments containing segments and fitting info
+        show_components : bool, default True
+            Whether to show residual plot as subplot
+        figsize : tuple, default (12, 8)
+            Figure size (width, height) in inches
+        """
+        # Create subplots
+        if show_components:
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=figsize, height_ratios=[3, 1])
+        else:
+            fig, ax1 = plt.subplots(figsize=figsize)
+            ax2 = None
+
+        # Plot observed data
+        ax1.scatter(self.x_data, self.y_data, alpha=0.6, color='black', s=30,
+                   label='Observed', zorder=3)
+
+        # Generate smooth curve for plotting fitted segments
         x_plot = np.linspace(self.x_min, self.x_max, 500)
-        y_plot = np.zeros_like(x_plot)
-        
         segments = result['segments']
-        colors = plt.cm.tab10(np.linspace(0, 1, len(segments)))
-        
-        for seg, color in zip(segments, colors):
+
+        # Plot each segment with different colors
+        colors = plt.cm.Set1(np.linspace(0, 1, len(segments)))
+
+        for i, seg in enumerate(segments):
+            # Create x range for this segment
             mask = (x_plot >= seg.x_start) & (x_plot <= seg.x_end)
             x_seg = x_plot[mask]
+
             if len(x_seg) > 0:
-                y_seg = seg.evaluate_safe(x_seg)
-                y_plot[mask] = y_seg
-                ax.plot(x_seg, y_seg, color=color, linewidth=2,
-                       label=f'Seg {segments.index(seg)+1}: n={seg.n:.2f}')
-        
-        # Mark breakpoints
-        for i in range(len(segments) - 1):
-            x_break = segments[i].x_end
-            ax.axvline(x_break, color='gray', linestyle='--', alpha=0.5)
-        
-        ax.set_xlabel('X')
-        ax.set_ylabel('Y')
-        ax.set_title(f'Segmented Power Curve Fit ({len(segments)} segments)')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        # Component plot
-        if show_components and len(axes) > 1:
-            ax2 = axes[1]
-            
+                y_seg = seg.evaluate(x_seg)
+
+                ax1.plot(x_seg, y_seg, color=colors[i], linewidth=2,
+                        label=f"Segment {i+1}: Q = {seg.a:.2f}×(X-{seg.x0:.2f})^{seg.n:.2f}")
+
+                # Add vertical lines at segment boundaries
+                if i < len(segments) - 1:
+                    boundary_x = seg.x_end
+                    ax1.axvline(boundary_x, color=colors[i], linestyle='--', alpha=0.7)
+
+        # Set main plot properties
+        ax1.set_xlabel('Water Level')
+        ax1.set_ylabel('Discharge')
+        ax1.set_title(f'Segmented Power Curve Fit\n'
+                     f'{len(segments)} segments - Objective: {result["objective"]:.2f}')
+        ax1.grid(True, alpha=0.3)
+        ax1.legend(loc='upper left', fontsize=9)
+
+        # Log scale for better visualization
+        ax1.set_yscale('log')
+
+        if show_components and ax2 is not None:
             # Calculate residuals
             y_fitted = np.zeros_like(self.y_data)
             for i, x in enumerate(self.x_data):
                 for seg in segments:
                     if seg.x_start <= x <= seg.x_end:
-                        y_fitted[i] = seg.evaluate_safe(x)
+                        y_fitted[i] = seg.evaluate(x)
                         break
-            
-            residuals = self.y_data - y_fitted
-            rel_errors = np.abs(residuals) / (np.abs(self.y_data) + 1e-10)
-            
-            ax2.scatter(self.x_data, rel_errors * 100, alpha=0.6)
-            ax2.axhline(15, color='red', linestyle='--', label='15% threshold')
-            ax2.axhline(5, color='orange', linestyle='--', label='5% threshold')
-            ax2.set_xlabel('X')
-            ax2.set_ylabel('Relative Error (%)')
-            ax2.set_title('Fitting Errors')
-            ax2.legend()
+
+            residuals = 100 * (y_fitted - self.y_data) / self.y_data
+
+            # Plot residuals
+            ax2.scatter(self.x_data, residuals, alpha=0.6, color='blue', s=20)
+            ax2.axhline(y=0, color='black', linestyle='-', alpha=0.7)
+            ax2.axhline(y=10, color='red', linestyle='--', alpha=0.5, label='±10%')
+            ax2.axhline(y=-10, color='red', linestyle='--', alpha=0.5)
+            ax2.axhline(y=20, color='orange', linestyle='--', alpha=0.5, label='±20%')
+            ax2.axhline(y=-20, color='orange', linestyle='--', alpha=0.5)
+
+            ax2.set_xlabel('Water Level')
+            ax2.set_ylabel('Residual (%)')
+            ax2.set_title('Residuals (Fitted - Observed)/Observed × 100%')
             ax2.grid(True, alpha=0.3)
-        
+            ax2.legend(loc='upper right')
+
+            # Set reasonable y-limits for residuals
+            residual_max = np.max(np.abs(residuals))
+            ax2.set_ylim(-min(50, residual_max * 1.2), min(50, residual_max * 1.2))
+
         plt.tight_layout()
+
+        if show_components:
+            return fig, (ax1, ax2)
+        else:
+            return fig, ax1

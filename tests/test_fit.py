@@ -37,7 +37,7 @@ if __name__ == "__main__":
     # Create fitter with last segment
     fitter = SegmentedPowerCurveFitter(x, y)#, last_segment_params)
 
-    result = fitter.fit_segments(n_segments=3, continuity_weight=1000, outlier_method='soft_l1')
+    result = fitter.fit_segments(n_segments=3)
 
     fitter.plot_results(result)
 
