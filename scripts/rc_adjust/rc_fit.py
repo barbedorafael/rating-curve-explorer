@@ -15,7 +15,7 @@ class Segment:
     
     def evaluate(self, x):
         """Evaluate the power function at given x values"""
-        return self.a * (x - self.x0) ** self.n
+        return self.a * np.maximum(x - self.x0, 0) ** self.n
 
 class SegmentedPowerCurveFitter:
     def __init__(self, x_data, y_data, last_segment_params=None):
@@ -42,27 +42,27 @@ class SegmentedPowerCurveFitter:
         self.x_min = self.x_data.min()
         self.x_max = self.x_data.max()
         
-    def create_objective_function(self, 
-                                  loss_weight=100,
+    def create_objective_function(self,
+                                  loss_weight=5,
                                   continuity_threshold=0.05,
-                                  continuity_weight=10,
+                                  continuity_weight=100,
                                   min_segment_range=0.1,
                                   min_range_weight=1,
                                   min_points_per_segment=2,
-                                  min_points_weight=1):
+                                  min_points_weight=1,
+                                  param_deviation_weight=1,
+                                  n_deviation_weight=10,
+                                  bias_weight=5,
+                                  n_bias_bins=5):
         """
         Create a custom objective function with various criteria
-        
+
         Parameters:
         -----------
         loss_weight: float
             Weight for loss function penalty (MPE)
         continuity_weight: float
             Weight for continuity violation penalty
-        outlier_method: str
-            Method for handling outliers ('huber', 'soft_l1', 'cauchy')
-        outlier_threshold: float
-            Threshold for outlier detection
         min_segment_range: float or None
             Minimum x-range each segment must cover (prevents tiny segments)
         min_range_weight: float
@@ -71,6 +71,14 @@ class SegmentedPowerCurveFitter:
             Minimum number of data points each segment must cover
         min_points_weight: float
             Weight for penalty when segments have too few points
+        param_deviation_weight: float
+            Weight for penalty when segment parameters deviate from reference
+        n_deviation_weight: float
+            Additional weight specifically for 'n' parameter deviations
+        bias_weight: float
+            Weight for bias penalty to balance errors across x-values
+        n_bias_bins: int
+            Number of bins for bias penalty calculation
         """
         
         def objective(params, n_segments, return_components=False):
@@ -112,20 +120,68 @@ class SegmentedPowerCurveFitter:
             segment_point_counts = []
             for seg in segments:
                 # Count points in this segment
-                points_in_segment = np.sum((self.x_data >= seg.x_start) & 
+                points_in_segment = np.sum((self.x_data >= seg.x_start) &
                                           (self.x_data <= seg.x_end))
                 segment_point_counts.append(points_in_segment)
-                
+
                 if points_in_segment < min_points_per_segment:
                     # Penalty for having too few points
                     min_points_penalty += 1
-            
+
+            # Parameter deviation penalty
+            param_deviation_penalty = 0
+            n_deviation_penalty = 0
+            if self.last_segment_params and len(segments) > 1:
+                # Reference parameters from last segment
+                ref_a = self.last_segment_params['a']
+                ref_x0 = self.last_segment_params['x0']
+                ref_n = self.last_segment_params['n']
+
+                # Calculate deviations for all segments except the last one
+                for seg in segments[:-1]:
+                    # Relative deviations for a and x0
+                    a_dev = abs(seg.a - ref_a) / (abs(ref_a) + 1e-10)
+                    x0_dev = abs(seg.x0 - ref_x0) / (abs(ref_x0) + 1e-10)
+
+                    param_deviation_penalty += a_dev**2 + x0_dev**2
+
+                    # Special penalty for n parameter deviations
+                    n_dev = abs(seg.n - ref_n) / (abs(ref_n) + 1e-10)
+                    n_deviation_penalty += n_dev**2
+
+            # Bias penalty - balance errors across x-values using percentile-based bins
+            bias_penalty = 0
+            if len(self.x_data) >= n_bias_bins:
+                # Create bins using data percentiles for equal sample sizes
+                percentiles = np.linspace(0, 100, n_bias_bins + 1)
+                bin_edges = np.percentile(self.x_data, percentiles)
+
+                # Ensure unique bin edges
+                bin_edges = np.unique(bin_edges)
+                n_actual_bins = len(bin_edges) - 1
+
+                if n_actual_bins > 1:
+                    # Assign data points to bins
+                    bin_indices = np.digitize(self.x_data, bin_edges) - 1
+                    bin_indices = np.clip(bin_indices, 0, n_actual_bins - 1)
+
+                    # Calculate bias in each bin
+                    for i in range(n_actual_bins):
+                        mask = (bin_indices == i)
+                        if np.sum(mask) > 0:
+                            bin_residuals = rel_errors[mask]  # Use relative errors for bias
+                            bin_bias = np.mean(bin_residuals - np.mean(rel_errors))  # Deviation from overall mean
+                            bias_penalty += bin_bias**2
+
             # Total objective
-            total = (loss_weight * loss_penalty + 
+            total = (loss_weight * loss_penalty +
                     continuity_weight * continuity_penalty +
                     min_range_weight * min_range_penalty +
-                    min_points_weight * min_points_penalty)
-            
+                    min_points_weight * min_points_penalty +
+                    param_deviation_weight * param_deviation_penalty +
+                    n_deviation_weight * n_deviation_penalty +
+                    bias_weight * bias_penalty)
+
             if return_components:
                 return {
                     'total': total,
@@ -133,6 +189,9 @@ class SegmentedPowerCurveFitter:
                     'continuity_penalty': continuity_penalty,
                     'min_range_penalty': min_range_penalty,
                     'min_points_penalty': min_points_penalty,
+                    'param_deviation_penalty': param_deviation_penalty,
+                    'n_deviation_penalty': n_deviation_penalty,
+                    'bias_penalty': bias_penalty,
                     'segment_point_counts': segment_point_counts
                 }
             
@@ -189,14 +248,21 @@ class SegmentedPowerCurveFitter:
         
         # Parameters for each segment (except last if predefined)
         n_param_segments = n_segments - 1 if self.last_segment_params else n_segments
-        
+
         for i in range(n_param_segments):
-            # Simple initial guesses
-            a = np.mean(self.y_data)
-            x0 = self.x_min
-            n = 1.5
-            params.extend([a, x0, n])
-        
+            # Use last segment parameters as base, adjust x0 for each segment
+            if self.last_segment_params:
+                a_init = self.last_segment_params['a']
+                x0_init = self.last_segment_params['x0']
+                n_init = self.last_segment_params['n']
+            else:
+                # Fallback to simple initial guesses
+                a_init = np.mean(self.y_data)
+                x0_init = np.min(self.x_data) * 0.9
+                n_init = 1.5
+
+            params.extend([a_init, x0_init, n_init])
+
         return np.array(params)
     
     def get_bounds(self, n_segments):
@@ -214,8 +280,8 @@ class SegmentedPowerCurveFitter:
         for _ in range(n_param_segments):
             # a: coefficient
             bounds.append((1, 1e4))
-            # x0: offset
-            bounds.append((-100, self.x_min*0.9))
+            # x0: offset in m
+            bounds.append((-100, 100))
             # n: power
             bounds.append((1.2, 5))
         
@@ -239,6 +305,7 @@ class SegmentedPowerCurveFitter:
         result = differential_evolution(
             lambda p: objective(p, n_segments),
             bounds,
+            x0=initial_guess,
             seed=42,
             maxiter=1000,
             popsize=50,

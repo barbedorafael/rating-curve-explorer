@@ -12,7 +12,7 @@ if __name__ == "__main__":
     db_path = "data/hydrodata.sqlite"
     station_id = 72810000  # Example station from CLAUDE.md
 
-    print(f"Testing Johnson Rating Curve Adjuster for station {station_id}")
+    print(f"Testing Rating Curve Adjuster for station {station_id}")
     print("=" * 60)
 
     station = HydroDB(db_path, station_id)
@@ -27,7 +27,7 @@ if __name__ == "__main__":
     # Define last segment: y = a * (x - x0)^n
     last_segment_params = {
         'a': 137.7506,      # Coefficient
-        'x0': 0.55,         # X offset
+        'x0': 0.45, # 0.55,         # X offset
         'n': 1.54,          # Power
         'x_start': 1.2      # Where this segment starts
     }
@@ -35,7 +35,7 @@ if __name__ == "__main__":
     x = data['level'].values
     y = data['discharge'].values
     # Create fitter with last segment
-    fitter = SegmentedPowerCurveFitter(x, y)#, last_segment_params)
+    fitter = SegmentedPowerCurveFitter(x, y, last_segment_params)
 
     result = fitter.fit_segments(n_segments=3)
 
