@@ -12,12 +12,13 @@ import streamlit as st
 import sqlite3
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Tuple, List, Dict
-import seaborn as sns
+import plotly.io as pio
 from scipy.optimize import minimize
 
 # Page configuration
@@ -161,15 +162,15 @@ class BaseStationAnalyzer:
     def _setup_curve_colors(self):
         """Setup consistent color mapping for rating curves."""
         if not self.rating_curves.empty:
-            # Use seaborn color palette for consistent colors
+            # Use Plotly color palette for consistent colors
             n_curves = len(self.rating_curves)
-            colors = sns.color_palette("tab10", n_curves)
+            plotly_colors = px.colors.qualitative.Plotly
 
             # Clear existing colors for new station
             self._curve_colors = {}
 
             for i, (_, curve) in enumerate(self.rating_curves.iterrows()):
-                self._curve_colors[curve['curve_id']] = colors[i]
+                self._curve_colors[curve['curve_id']] = plotly_colors[i % len(plotly_colors)]
 
     def get_data_by_rating_curve(self, selected_curves: Optional[List[str]] = None) -> Dict[str, pd.DataFrame]:
         """
@@ -317,12 +318,13 @@ class TimeseriesAnalyzer(BaseStationAnalyzer):
             ax.xaxis.set_major_locator(mdates.YearLocator())
             ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
 
-    def plot_timeseries(self, plot_type: str, figsize: Tuple[int, int] = (15, 6)) -> plt.Figure:
-        """Create timeseries plot with rating curve indicators."""
+    def plot_timeseries(self, plot_type: str, figsize: Tuple[int, int] = (15, 6)) -> go.Figure:
+        """Create timeseries plot with rating curve indicators using Plotly."""
         if self._station_id is None:
             raise ValueError("No station selected. Use set_station() first.")
 
-        fig, ax = plt.subplots(1, 1, figsize=figsize)
+        # Create figure
+        fig = go.Figure()
 
         # Get appropriate data
         data = self.get_timeseries_data(plot_type.lower())
@@ -330,12 +332,12 @@ class TimeseriesAnalyzer(BaseStationAnalyzer):
         if plot_type == "Level":
             value_col = 'level'
             ylabel = 'Water Level (cm)'
-            color = 'b'
+            color = 'blue'
             label = 'Water Level'
         else:
             value_col = 'discharge'
             ylabel = 'Discharge (m³/s)'
-            color = 'g'
+            color = 'green'
             label = 'Discharge'
 
         # Get plot date range
@@ -345,13 +347,16 @@ class TimeseriesAnalyzer(BaseStationAnalyzer):
         if not data.empty:
             filled_data = self._fill_missing_dates(data, value_col)
 
-            # Plot main timeseries
-            ax.plot(filled_data['date'], filled_data[value_col],
-                   f'{color}-', linewidth=1, alpha=0.7, label=label)
-
-        # Set axis properties
-        ax.set_ylabel(ylabel, color=color)
-        ax.tick_params(axis='y', labelcolor=color)
+            # Plot main timeseries with hover info
+            fig.add_trace(go.Scatter(
+                x=filled_data['date'],
+                y=filled_data[value_col],
+                mode='lines',
+                name=label,
+                line=dict(color=color, width=1),
+                opacity=0.7,
+                hovertemplate=f'<b>Date:</b> %{{x}}<br><b>{plot_type}:</b> %{{y:.1f}}<extra></extra>'
+            ))
 
         # Add rating curve validity indicators
         for _, curve in self.rating_curves.iterrows():
@@ -359,9 +364,11 @@ class TimeseriesAnalyzer(BaseStationAnalyzer):
             if curve['end_date'] >= plot_start and curve['start_date'] <= plot_end:
                 # Vertical lines for date ranges
                 if curve['start_date'] >= plot_start:
-                    ax.axvline(curve['start_date'], color='red', linestyle='--', alpha=0.7, linewidth=1)
+                    fig.add_vline(x=curve['start_date'], line_dash="dash", line_color="red",
+                                 opacity=0.7, line_width=1)
                 if curve['end_date'] < pd.Timestamp('2099-01-01') and curve['end_date'] <= plot_end:
-                    ax.axvline(curve['end_date'], color='red', linestyle='--', alpha=0.7, linewidth=1)
+                    fig.add_vline(x=curve['end_date'], line_dash="dash", line_color="red",
+                                 opacity=0.7, line_width=1)
 
                 # Horizontal lines for level/discharge limits (limited to date range)
                 line_start = max(curve['start_date'], plot_start)
@@ -376,17 +383,34 @@ class TimeseriesAnalyzer(BaseStationAnalyzer):
                     # Q = a * (H - h0)^n
                     y_min = curve['a_param'] * max(curve['h_min']/100 - curve['h0_param'], 0) ** curve['n_param']
                     y_max = curve['a_param'] * max(curve['h_max']/100 - curve['h0_param'], 0) ** curve['n_param']
-                
+
                 y_pos = (y_max + y_min) / 2
-                ax.hlines(y_min, line_start, line_end,
-                         colors='orange', linestyles=':', alpha=0.5, linewidth=1)
-                ax.hlines(y_max, line_start, line_end,
-                         colors='orange', linestyles=':', alpha=0.5, linewidth=1)
+
+                # Add horizontal lines using shapes for better control over line extent
+                fig.add_shape(
+                    type="line",
+                    x0=line_start, y0=y_min, x1=line_end, y1=y_min,
+                    line=dict(color="orange", width=1, dash="dot"),
+                    opacity=0.5
+                )
+                fig.add_shape(
+                    type="line",
+                    x0=line_start, y0=y_max, x1=line_end, y1=y_max,
+                    line=dict(color="orange", width=1, dash="dot"),
+                    opacity=0.5
+                )
 
                 # Add text annotation for segment
                 mid_date = line_start + (line_end - line_start) / 2
-                ax.text(mid_date, y_pos, f"Seg {curve['segment_number']}",
-                       rotation=0, fontsize=8, ha='center', va='center_baseline', color='red')
+                fig.add_annotation(
+                    x=mid_date,
+                    y=y_pos,
+                    text=f"Seg {curve['segment_number']}",
+                    showarrow=False,
+                    font=dict(size=8, color="red"),
+                    xanchor="center",
+                    yanchor="middle"
+                )
 
         # Add measured points
         if not self.measured_data.empty:
@@ -401,31 +425,48 @@ class TimeseriesAnalyzer(BaseStationAnalyzer):
                 y_values_poor = poor_points['discharge']
 
             if not good_points.empty:
-                ax.scatter(good_points['date'], y_values_good,
-                          c='darkgreen', s=30, alpha=0.8, label='Measurement Expeditions', zorder=5)
+                fig.add_trace(go.Scatter(
+                    x=good_points['date'],
+                    y=y_values_good,
+                    mode='markers',
+                    name='Measurement Expeditions',
+                    marker=dict(color='darkgreen', size=8, opacity=0.8),
+                    hovertemplate='<b>Date:</b> %{x}<br>' +
+                                f'<b>{plot_type}:</b> %{{y:.1f}}<br>' +
+                                '<b>Quality:</b> Good<extra></extra>'
+                ))
 
             if not poor_points.empty:
-                ax.scatter(poor_points['date'], y_values_poor,
-                          c='orange', s=30, alpha=0.8, label='Measurement Expeditions (Poor)', zorder=5)
+                fig.add_trace(go.Scatter(
+                    x=poor_points['date'],
+                    y=y_values_poor,
+                    mode='markers',
+                    name='Measurement Expeditions (Poor)',
+                    marker=dict(color='orange', size=8, opacity=0.8),
+                    hovertemplate='<b>Date:</b> %{x}<br>' +
+                                f'<b>{plot_type}:</b> %{{y:.1f}}<br>' +
+                                '<b>Quality:</b> Poor<extra></extra>'
+                ))
 
-        # Set axis limits and formatting
-        ax.set_xlim(plot_start, plot_end)
-        ax.set_xlabel('Date')
+        # Update layout
+        title_text = f'Station {self._station_id} - {plot_type} Timeseries<br>'
+        title_text += '<sub>Red dashed lines: Rating curve periods | Orange dotted lines: Level limits</sub>'
 
-        # Format x-axis with dynamic spacing
-        self._format_x_axis(ax, plot_start, plot_end)
-        plt.xticks(rotation=45)
+        fig.update_layout(
+            title=title_text,
+            xaxis_title="Date",
+            yaxis_title=ylabel,
+            xaxis=dict(range=[plot_start, plot_end]),
+            hovermode='closest',
+            showlegend=True,
+            height=int(figsize[1] * 100),  # Convert figsize to pixels
+            width=int(figsize[0] * 100),
+            legend=dict(x=0, y=1, xanchor='left', yanchor='top')
+        )
 
-        # Add legend and grid
-        ax.legend(loc='upper left')
-        ax.grid(True, alpha=0.3)
-
-        # Title
-        title_text = f'Station {self._station_id} - {plot_type} Timeseries\n'
-        title_text += 'Red dashed lines: Rating curve periods | Orange dotted lines: Level limits'
-
-        plt.title(title_text)
-        plt.tight_layout()
+        # Add grid
+        fig.update_xaxes(showgrid=True, gridcolor='lightgray')
+        fig.update_yaxes(showgrid=True, gridcolor='lightgray')
 
         return fig
 
@@ -458,9 +499,9 @@ class ScatterAnalyzer(BaseStationAnalyzer):
     }
 
     def plot_scatter(self, plot_type: str, selected_curves: Optional[List[str]] = None,
-                    figsize: Tuple[int, int] = (12, 8)) -> plt.Figure:
+                    figsize: Tuple[int, int] = (12, 8)) -> go.Figure:
         """
-        Create scatter plot of stage_discharge variables colored by rating curve.
+        Create scatter plot of stage_discharge variables colored by rating curve using Plotly.
 
         Args:
             plot_type: One of the keys in PLOT_CONFIGS
@@ -468,7 +509,7 @@ class ScatterAnalyzer(BaseStationAnalyzer):
             figsize: Figure size tuple
 
         Returns:
-            matplotlib Figure object
+            Plotly Figure object
         """
         if self._station_id is None:
             raise ValueError("No station selected. Use set_station() first.")
@@ -478,17 +519,29 @@ class ScatterAnalyzer(BaseStationAnalyzer):
 
         config = self.PLOT_CONFIGS[plot_type]
 
-        fig, ax = plt.subplots(1, 1, figsize=figsize)
+        # Create figure
+        fig = go.Figure()
 
         # Get data filtered by rating curves
         curve_data = self.get_data_by_rating_curve(selected_curves)
 
         if not curve_data:
-            ax.text(0.5, 0.5, 'No data available for selected curves',
-                   ha='center', va='center', transform=ax.transAxes, fontsize=14)
-            ax.set_xlabel(config['xlabel'])
-            ax.set_ylabel(config['ylabel'])
-            ax.set_title(f"Station {self._station_id} - {config['title']}")
+            # Add annotation for no data message
+            fig.add_annotation(
+                x=0.5, y=0.5,
+                text='No data available for selected curves',
+                xref='paper', yref='paper',
+                showarrow=False,
+                font=dict(size=14)
+            )
+
+            fig.update_layout(
+                title=f"Station {self._station_id} - {config['title']}",
+                xaxis_title=config['xlabel'],
+                yaxis_title=config['ylabel'],
+                height=int(figsize[1] * 100),
+                width=int(figsize[0] * 100)
+            )
             return fig
 
         # Plot each rating curve with different color
@@ -511,23 +564,35 @@ class ScatterAnalyzer(BaseStationAnalyzer):
             # Get color for this curve
             color = self._curve_colors.get(curve_id, 'gray')
 
-            # Create scatter plot
-            ax.scatter(plot_data[x_col], plot_data[y_col],
-                      c=[color], alpha=0.7, s=40,
-                      label=f'Curve {curve_id}', zorder=5)
+            # Create scatter plot with hover information
+            fig.add_trace(go.Scatter(
+                x=plot_data[x_col],
+                y=plot_data[y_col],
+                mode='markers',
+                name=f'Curve {curve_id}',
+                marker=dict(color=color, size=8, opacity=0.7),
+                hovertemplate='<b>Curve:</b> %{fullData.name}<br>' +
+                            f'<b>{config["xlabel"]}:</b> %{{x:.2f}}<br>' +
+                            f'<b>{config["ylabel"]}:</b> %{{y:.1f}}<br>' +
+                            '<b>Date:</b> %{customdata}<extra></extra>',
+                customdata=plot_data['date'].dt.strftime('%Y-%m-%d')
+            ))
 
-        # Formatting
-        ax.set_xlabel(config['xlabel'])
-        ax.set_ylabel(config['ylabel'])
-        ax.set_title(f"Station {self._station_id} - {config['title']}\n" \
-                    f"Data colored by rating curve segment")
+        # Update layout
+        fig.update_layout(
+            title=f"Station {self._station_id} - {config['title']}<br>" +
+                  "<sub>Data colored by rating curve segment</sub>",
+            xaxis_title=config['xlabel'],
+            yaxis_title=config['ylabel'],
+            hovermode='closest',
+            showlegend=len(curve_data) > 1,
+            height=int(figsize[1] * 100),
+            width=int(figsize[0] * 100)
+        )
 
-        # Add legend if there are multiple curves
-        if len(curve_data) > 1:
-            ax.legend(loc='best')
-
-        ax.grid(True, alpha=0.3)
-        plt.tight_layout()
+        # Add grid
+        fig.update_xaxes(showgrid=True, gridcolor='lightgray')
+        fig.update_yaxes(showgrid=True, gridcolor='lightgray')
 
         return fig
 
@@ -619,31 +684,43 @@ class ProfileAnalyzer(BaseStationAnalyzer):
         return filtered_survey_ids
 
     def plot_vertical_profiles(self, selected_curve_id: Optional[str] = None,
-                              figsize: Tuple[int, int] = (12, 8)) -> plt.Figure:
+                              figsize: Tuple[int, int] = (12, 8)) -> go.Figure:
         """
-        Create vertical profile plots colored by survey_id with rating curve filtering.
+        Create vertical profile plots colored by survey_id with rating curve filtering using Plotly.
 
         Args:
             selected_curve_id: Single curve_id to filter profiles by date
             figsize: Figure size tuple
 
         Returns:
-            matplotlib Figure object
+            Plotly Figure object
         """
         if self._station_id is None:
             raise ValueError("No station selected. Use set_station() first.")
 
-        fig, ax = plt.subplots(1, 1, figsize=figsize)
+        # Create figure
+        fig = go.Figure()
 
         # Get filtered survey IDs based on rating curve selection
         filtered_survey_ids = self.filter_profiles_by_rating_curve(selected_curve_id)
 
         if not filtered_survey_ids:
-            ax.text(0.5, 0.5, 'No vertical profiles available for selected rating curve period',
-                   ha='center', va='center', transform=ax.transAxes, fontsize=14)
-            ax.set_xlabel('Distance (m)')
-            ax.set_ylabel('Elevation (cm)')
-            ax.set_title(f"Station {self._station_id} - Vertical Profiles")
+            # Add annotation for no data message
+            fig.add_annotation(
+                x=0.5, y=0.5,
+                text='No vertical profiles available for selected rating curve period',
+                xref='paper', yref='paper',
+                showarrow=False,
+                font=dict(size=14)
+            )
+
+            fig.update_layout(
+                title=f"Station {self._station_id} - Vertical Profiles",
+                xaxis_title="Distance (m)",
+                yaxis_title="Elevation (cm)",
+                height=int(figsize[1] * 100),
+                width=int(figsize[0] * 100)
+            )
             return fig
 
         # Get profile data
@@ -651,16 +728,27 @@ class ProfileAnalyzer(BaseStationAnalyzer):
         profiles_meta = self.get_vertical_profiles()
 
         if not profile_data:
-            ax.text(0.5, 0.5, 'No profile measurement data available',
-                   ha='center', va='center', transform=ax.transAxes, fontsize=14)
-            ax.set_xlabel('Distance (m)')
-            ax.set_ylabel('Elevation (cm)')
-            ax.set_title(f"Station {self._station_id} - Vertical Profiles")
+            # Add annotation for no data message
+            fig.add_annotation(
+                x=0.5, y=0.5,
+                text='No profile measurement data available',
+                xref='paper', yref='paper',
+                showarrow=False,
+                font=dict(size=14)
+            )
+
+            fig.update_layout(
+                title=f"Station {self._station_id} - Vertical Profiles",
+                xaxis_title="Distance (m)",
+                yaxis_title="Elevation (cm)",
+                height=int(figsize[1] * 100),
+                width=int(figsize[0] * 100)
+            )
             return fig
 
         # Create color palette for surveys
         n_surveys = len(profile_data)
-        colors = sns.color_palette("tab10", n_surveys)
+        plotly_colors = px.colors.qualitative.Plotly
 
         # Plot each survey with different color
         for i, (survey_id, data) in enumerate(profile_data.items()):
@@ -672,8 +760,19 @@ class ProfileAnalyzer(BaseStationAnalyzer):
             else:
                 label = f"Survey {survey_id}"
 
-            ax.plot(data['distance'], data['elevation'],
-                   color=colors[i], linewidth=2, alpha=0.8, label=label)
+            color = plotly_colors[i % len(plotly_colors)]
+
+            fig.add_trace(go.Scatter(
+                x=data['distance'],
+                y=data['elevation'],
+                mode='lines',
+                name=label,
+                line=dict(color=color, width=2),
+                opacity=0.8,
+                hovertemplate='<b>Survey:</b> %{fullData.name}<br>' +
+                            '<b>Distance:</b> %{x} m<br>' +
+                            '<b>Elevation:</b> %{y} cm<extra></extra>'
+            ))
 
         # Add h_max horizontal lines from ALL rating curve segments (not just the selected one)
         if selected_curve_id and not self.rating_curves.empty:
@@ -698,15 +797,22 @@ class ProfileAnalyzer(BaseStationAnalyzer):
                         curve_color = self._curve_colors.get(curve['curve_id'], 'gray')
 
                         # Draw h_max line
-                        ax.axhline(curve['h_max'], color=curve_color, linestyle='--',
-                                 alpha=0.7, linewidth=2)
+                        fig.add_hline(y=curve['h_max'], line_dash="dash", line_color=curve_color,
+                                     opacity=0.7, line_width=2)
 
-                        # Add text label on the right side of the plot
-                        ax.text(0.98, curve['h_max'], f"{curve['segment_number']}: {curve['h_max']:.0f}cm",
-                               transform=ax.get_yaxis_transform(),
-                               verticalalignment='bottom', horizontalalignment='right',
-                               fontsize=9, color=curve_color, weight='bold',
-                               bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8, edgecolor=curve_color))
+                        # Add text annotation on the right side
+                        fig.add_annotation(
+                            x=0.98, y=curve['h_max'],
+                            text=f"{curve['segment_number']}: {curve['h_max']:.0f}cm",
+                            xref='paper', yref='y',
+                            showarrow=False,
+                            font=dict(size=9, color=curve_color),
+                            xanchor='right',
+                            yanchor='bottom',
+                            bgcolor='white',
+                            bordercolor=curve_color,
+                            borderwidth=1
+                        )
 
         # Add stage_discharge campaign dots (level values as dots in the middle of plot)
         # Only show dots when a specific rating curve is selected (not for "Show All")
@@ -726,19 +832,25 @@ class ProfileAnalyzer(BaseStationAnalyzer):
                 ]
 
                 if not filtered_measurements.empty:
-                    # Get x-axis range to position dots in the middle
-                    xlim = ax.get_xlim()
-                    x_middle = (xlim[0] + xlim[1]) / 2
+                    # Position dots in the middle of the x-axis range
+                    # We'll determine x_middle after the layout is set
+                    # For now, use a reasonable middle position
+                    x_middle = 0  # Will be updated in layout callback
 
                     # Plot level values from stage_discharge as dots
-                    for _, measurement in filtered_measurements.iterrows():
-                        ax.scatter(x_middle, measurement['level'],
-                                  c='red', s=20, alpha=0.6, zorder=10)
+                    fig.add_trace(go.Scatter(
+                        x=[x_middle] * len(filtered_measurements),
+                        y=filtered_measurements['level'],
+                        mode='markers',
+                        name='Discharge Campaigns',
+                        marker=dict(color='red', size=6, opacity=0.6),
+                        hovertemplate='<b>Discharge Campaign</b><br>' +
+                                    '<b>Level:</b> %{y} cm<br>' +
+                                    '<b>Date:</b> %{customdata}<extra></extra>',
+                        customdata=filtered_measurements['date'].dt.strftime('%Y-%m-%d')
+                    ))
 
-        # Formatting
-        ax.set_xlabel('Distance (m)')
-        ax.set_ylabel('Elevation (cm)')
-
+        # Create title text
         title_text = f"Station {self._station_id} - Vertical Cross-Section Profiles"
         if selected_curve_id:
             # Get curve info for title
@@ -749,20 +861,29 @@ class ProfileAnalyzer(BaseStationAnalyzer):
                 curve = selected_curve.iloc[0]
                 start_str = curve['start_date'].strftime('%Y-%m-%d')
                 end_str = curve['end_date'].strftime('%Y-%m-%d') if curve['end_date'] < pd.Timestamp('2099-01-01') else 'Current'
-                title_text += f"\nFiltered by: {start_str} to {end_str}"
+                title_text += f"<br><sub>Filtered by: {start_str} to {end_str}</sub>"
 
-        ax.set_title(title_text)
+        # Update layout
+        fig.update_layout(
+            title=title_text,
+            xaxis_title="Distance (m)",
+            yaxis_title="Elevation (cm)",
+            hovermode='closest',
+            showlegend=True,
+            height=int(figsize[1] * 100),
+            width=int(figsize[0] * 100),
+            legend=dict(font=dict(size=10))
+        )
 
-        # Add legend
-        ax.legend(loc='best', fontsize=10)
-        ax.grid(True, alpha=0.3)
+        # Add grid
+        fig.update_xaxes(showgrid=True, gridcolor='lightgray')
+        fig.update_yaxes(showgrid=True, gridcolor='lightgray')
 
-        plt.tight_layout()
         return fig
 
     def plot_selected_vertical_profiles(self, selected_curve_id: Optional[str] = None,
                                       selected_survey_ids: List[int] = None,
-                                      figsize: Tuple[int, int] = (12, 8)) -> plt.Figure:
+                                      figsize: Tuple[int, int] = (12, 8)) -> go.Figure:
         """
         Create vertical profile plots for specifically selected surveys.
 
@@ -772,19 +893,27 @@ class ProfileAnalyzer(BaseStationAnalyzer):
             figsize: Figure size tuple
 
         Returns:
-            matplotlib Figure object
+            Plotly Figure object
         """
         if self._station_id is None:
             raise ValueError("No station selected. Use set_station() first.")
 
-        fig, ax = plt.subplots(1, 1, figsize=figsize)
+        fig = go.Figure()
 
         if not selected_survey_ids:
-            ax.text(0.5, 0.5, 'No surveys selected for display',
-                   ha='center', va='center', transform=ax.transAxes, fontsize=14)
-            ax.set_xlabel('Distance (m)')
-            ax.set_ylabel('Elevation (cm)')
-            ax.set_title(f"Station {self._station_id} - Vertical Profiles")
+            fig.add_annotation(
+                x=0.5, y=0.5,
+                xref="paper", yref="paper",
+                text="No surveys selected for display",
+                showarrow=False,
+                font=dict(size=14)
+            )
+            fig.update_layout(
+                xaxis_title="Distance (m)",
+                yaxis_title="Elevation (cm)",
+                title=f"Station {self._station_id} - Vertical Profiles",
+                width=figsize[0]*100, height=figsize[1]*100
+            )
             return fig
 
         # Get profile data for selected surveys only
@@ -792,16 +921,24 @@ class ProfileAnalyzer(BaseStationAnalyzer):
         profiles_meta = self.get_vertical_profiles()
 
         if not profile_data:
-            ax.text(0.5, 0.5, 'No profile measurement data available for selected surveys',
-                   ha='center', va='center', transform=ax.transAxes, fontsize=14)
-            ax.set_xlabel('Distance (m)')
-            ax.set_ylabel('Elevation (cm)')
-            ax.set_title(f"Station {self._station_id} - Vertical Profiles")
+            fig.add_annotation(
+                x=0.5, y=0.5,
+                xref="paper", yref="paper",
+                text="No profile measurement data available for selected surveys",
+                showarrow=False,
+                font=dict(size=14)
+            )
+            fig.update_layout(
+                xaxis_title="Distance (m)",
+                yaxis_title="Elevation (cm)",
+                title=f"Station {self._station_id} - Vertical Profiles",
+                width=figsize[0]*100, height=figsize[1]*100
+            )
             return fig
 
         # Create color palette for surveys
         n_surveys = len(profile_data)
-        colors = sns.color_palette("tab10", n_surveys)
+        colors = px.colors.qualitative.Set1[:n_surveys]
 
         # Plot each selected survey with different color
         for i, (survey_id, data) in enumerate(profile_data.items()):
@@ -813,8 +950,17 @@ class ProfileAnalyzer(BaseStationAnalyzer):
             else:
                 label = f"Survey {survey_id}"
 
-            ax.plot(data['distance'], data['elevation'],
-                   color=colors[i], linewidth=2, alpha=0.8, label=label)
+            fig.add_trace(go.Scatter(
+                x=data['distance'],
+                y=data['elevation'],
+                mode='lines',
+                name=label,
+                line=dict(color=colors[i % len(colors)], width=2),
+                opacity=0.8,
+                hovertemplate='<b>Distance:</b> %{x:.1f} m<br>' +
+                            '<b>Elevation:</b> %{y:.1f} cm<br>' +
+                            '<b>Survey:</b> ' + label + '<extra></extra>'
+            ))
 
         # Add h_max horizontal lines from ALL rating curve segments (not just the selected one)
         if selected_curve_id and not self.rating_curves.empty:
@@ -839,15 +985,17 @@ class ProfileAnalyzer(BaseStationAnalyzer):
                         curve_color = self._curve_colors.get(curve['curve_id'], 'gray')
 
                         # Draw h_max line
-                        ax.axhline(curve['h_max'], color=curve_color, linestyle='--',
-                                 alpha=0.7, linewidth=2)
-
-                        # Add text label on the right side of the plot
-                        ax.text(0.98, curve['h_max'], f"{curve['segment_number']}: {curve['h_max']:.0f}cm",
-                               transform=ax.get_yaxis_transform(),
-                               verticalalignment='bottom', horizontalalignment='right',
-                               fontsize=9, color=curve_color, weight='bold',
-                               bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8, edgecolor=curve_color))
+                        fig.add_hline(
+                            y=curve['h_max'],
+                            line_dash="dash",
+                            line_color=curve_color,
+                            opacity=0.7,
+                            line_width=2,
+                            annotation_text=f"{curve['segment_number']}: {curve['h_max']:.0f}cm",
+                            annotation_position="right",
+                            annotation_font_color=curve_color,
+                            annotation_font_size=9
+                        )
 
         # Add stage_discharge campaign dots (level values as dots in the middle of plot)
         # Only show dots when a specific rating curve is selected (not for "Show All")
@@ -867,19 +1015,29 @@ class ProfileAnalyzer(BaseStationAnalyzer):
                 ]
 
                 if not filtered_measurements.empty:
-                    # Get x-axis range to position dots in the middle
-                    xlim = ax.get_xlim()
-                    x_middle = (xlim[0] + xlim[1]) / 2
+                    # Calculate x-axis middle position after traces are added
+                    if profile_data:
+                        all_distances = []
+                        for data in profile_data.values():
+                            all_distances.extend(data['distance'])
+                        x_middle = (min(all_distances) + max(all_distances)) / 2
+                    else:
+                        x_middle = 0
 
                     # Plot level values from stage_discharge as dots
-                    for _, measurement in filtered_measurements.iterrows():
-                        ax.scatter(x_middle, measurement['level'],
-                                  c='red', s=20, alpha=0.6, zorder=10)
+                    x_positions = [x_middle] * len(filtered_measurements)
+                    fig.add_trace(go.Scatter(
+                        x=x_positions,
+                        y=filtered_measurements['level'],
+                        mode='markers',
+                        name='Stage Measurements',
+                        marker=dict(color='red', size=8, opacity=0.6),
+                        hovertemplate='<b>Level:</b> %{y:.1f} cm<br>' +
+                                    '<b>Date:</b> %{customdata}<extra></extra>',
+                        customdata=filtered_measurements['date'].dt.strftime('%Y-%m-%d')
+                    ))
 
         # Formatting
-        ax.set_xlabel('Distance (m)')
-        ax.set_ylabel('Elevation (cm)')
-
         title_text = f"Station {self._station_id} - Vertical Cross-Section Profiles"
         if selected_curve_id:
             # Get curve info for title
@@ -890,15 +1048,19 @@ class ProfileAnalyzer(BaseStationAnalyzer):
                 curve = selected_curve.iloc[0]
                 start_str = curve['start_date'].strftime('%Y-%m-%d')
                 end_str = curve['end_date'].strftime('%Y-%m-%d') if curve['end_date'] < pd.Timestamp('2099-01-01') else 'Current'
-                title_text += f"\nFiltered by: {start_str} to {end_str}"
+                title_text += f"<br>Filtered by: {start_str} to {end_str}"
 
-        ax.set_title(title_text)
+        fig.update_layout(
+            xaxis_title="Distance (m)",
+            yaxis_title="Elevation (cm)",
+            title=title_text,
+            showlegend=True,
+            width=figsize[0]*100,
+            height=figsize[1]*100,
+            xaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.3)'),
+            yaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.3)')
+        )
 
-        # Add legend
-        ax.legend(loc='best', fontsize=10)
-        ax.grid(True, alpha=0.3)
-
-        plt.tight_layout()
         return fig
 
 
@@ -1028,9 +1190,9 @@ class RatingCurveAdjuster(BaseStationAnalyzer):
 
     def plot_stage_discharge(self, measurements: pd.DataFrame, segments: List[Dict],
                            log_x: bool = False, log_y: bool = False,
-                           figsize: Tuple[int, int] = (10, 6)) -> plt.Figure:
-        """Create stage-discharge plot with fitted curves."""
-        fig, ax = plt.subplots(1, 1, figsize=figsize)
+                           figsize: Tuple[int, int] = (10, 6)) -> go.Figure:
+        """Create stage-discharge plot with fitted curves using Plotly."""
+        fig = go.Figure()
 
         if not measurements.empty:
             # Plot active measurements
@@ -1042,43 +1204,80 @@ class RatingCurveAdjuster(BaseStationAnalyzer):
 
             # Plot active measurements
             if not active_measurements.empty:
-                ax.scatter(active_measurements['discharge'], active_measurements['level'],
-                          c='blue', alpha=0.7, s=40, label='Active Measurements', zorder=5)
+                fig.add_trace(go.Scatter(
+                    x=active_measurements['discharge'],
+                    y=active_measurements['level'],
+                    mode='markers',
+                    name='Active Measurements',
+                    marker=dict(color='blue', size=8, opacity=0.7),
+                    hovertemplate='<b>Date:</b> %{customdata}<br>' +
+                                '<b>Level:</b> %{y:.1f} cm<br>' +
+                                '<b>Discharge:</b> %{x:.2f} m³/s<br>' +
+                                '<b>Status:</b> Active<extra></extra>',
+                    customdata=active_measurements['date'].dt.strftime('%Y-%m-%d')
+                ))
 
             # Plot inactive measurements
             if not inactive_measurements.empty:
-                ax.scatter(inactive_measurements['discharge'], inactive_measurements['level'],
-                          c='lightgray', alpha=0.5, s=30, label='Inactive Measurements', zorder=3)
+                fig.add_trace(go.Scatter(
+                    x=inactive_measurements['discharge'],
+                    y=inactive_measurements['level'],
+                    mode='markers',
+                    name='Inactive Measurements',
+                    marker=dict(color='lightgray', size=6, opacity=0.5),
+                    hovertemplate='<b>Date:</b> %{customdata}<br>' +
+                                '<b>Level:</b> %{y:.1f} cm<br>' +
+                                '<b>Discharge:</b> %{x:.2f} m³/s<br>' +
+                                '<b>Status:</b> Inactive<extra></extra>',
+                    customdata=inactive_measurements['date'].dt.strftime('%Y-%m-%d')
+                ))
 
             # Plot fitted curves
             if segments:
-                colors = sns.color_palette("tab10", len(segments))
+                plotly_colors = px.colors.qualitative.Plotly
                 for i, segment in enumerate(segments):
                     # Create smooth curve for this segment
                     h_range = np.linspace(segment['h_min'], segment['h_max'], 100)
                     q_range = self.calculate_curve_discharge(h_range, segment['a'], segment['h0'], segment['n'])
 
-                    ax.plot(q_range, h_range * 100, color=colors[i], linewidth=2,
-                           label=f"Segment {i+1}", zorder=4)
+                    color = plotly_colors[i % len(plotly_colors)]
+                    fig.add_trace(go.Scatter(
+                        x=q_range,
+                        y=h_range * 100,
+                        mode='lines',
+                        name=f"Segment {i+1}",
+                        line=dict(color=color, width=2),
+                        hovertemplate='<b>Segment:</b> %{fullData.name}<br>' +
+                                    '<b>Discharge:</b> %{x:.2f} m³/s<br>' +
+                                    '<b>Level:</b> %{y:.1f} cm<extra></extra>'
+                    ))
 
         # Set scale
         if log_x:
-            ax.set_xscale('log')
+            fig.update_xaxes(type="log")
         if log_y:
-            ax.set_yscale('log')
+            fig.update_yaxes(type="log")
 
-        ax.set_xlabel('Discharge (m³/s)')
-        ax.set_ylabel('Level (cm)')
-        ax.set_title(f'Station {self._station_id} - Stage-Discharge Relationship')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        plt.tight_layout()
+        # Update layout
+        fig.update_layout(
+            title=f'Station {self._station_id} - Stage-Discharge Relationship',
+            xaxis_title='Discharge (m³/s)',
+            yaxis_title='Level (cm)',
+            hovermode='closest',
+            showlegend=True,
+            height=int(figsize[1] * 100),
+            width=int(figsize[0] * 100)
+        )
+
+        # Add grid
+        fig.update_xaxes(showgrid=True, gridcolor='lightgray')
+        fig.update_yaxes(showgrid=True, gridcolor='lightgray')
 
         return fig
 
-    def plot_error_vs_level(self, error_data: pd.DataFrame, figsize: Tuple[int, int] = (8, 6)) -> plt.Figure:
-        """Plot percent errors vs level."""
-        fig, ax = plt.subplots(1, 1, figsize=figsize)
+    def plot_error_vs_level(self, error_data: pd.DataFrame, figsize: Tuple[int, int] = (8, 6)) -> go.Figure:
+        """Plot percent errors vs level using Plotly."""
+        fig = go.Figure()
 
         if not error_data.empty:
             # Separate active and inactive measurements
@@ -1086,28 +1285,52 @@ class RatingCurveAdjuster(BaseStationAnalyzer):
             inactive_data = error_data[~error_data['active']]
 
             if not active_data.empty:
-                ax.scatter(active_data['level'], active_data['percent_error'],
-                          c='blue', alpha=0.7, s=40, label='Active')
+                fig.add_trace(go.Scatter(
+                    x=active_data['level'],
+                    y=active_data['percent_error'],
+                    mode='markers',
+                    name='Active',
+                    marker=dict(color='blue', size=8, opacity=0.7),
+                    hovertemplate='<b>Level:</b> %{x:.1f} cm<br>' +
+                                '<b>Error:</b> %{y:.1f}%<br>' +
+                                '<b>Status:</b> Active<extra></extra>'
+                ))
 
             if not inactive_data.empty:
-                ax.scatter(inactive_data['level'], inactive_data['percent_error'],
-                          c='lightgray', alpha=0.5, s=30, label='Inactive')
+                fig.add_trace(go.Scatter(
+                    x=inactive_data['level'],
+                    y=inactive_data['percent_error'],
+                    mode='markers',
+                    name='Inactive',
+                    marker=dict(color='lightgray', size=6, opacity=0.5),
+                    hovertemplate='<b>Level:</b> %{x:.1f} cm<br>' +
+                                '<b>Error:</b> %{y:.1f}%<br>' +
+                                '<b>Status:</b> Inactive<extra></extra>'
+                ))
 
             # Add zero line
-            ax.axhline(y=0, color='red', linestyle='--', alpha=0.7)
+            fig.add_hline(y=0, line_dash="dash", line_color="red", opacity=0.7)
 
-        ax.set_xlabel('Level (cm)')
-        ax.set_ylabel('Percent Error (%)')
-        ax.set_title('Rating Curve Errors vs Level')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        plt.tight_layout()
+        # Update layout
+        fig.update_layout(
+            title='Rating Curve Errors vs Level',
+            xaxis_title='Level (cm)',
+            yaxis_title='Percent Error (%)',
+            hovermode='closest',
+            showlegend=True,
+            height=int(figsize[1] * 100),
+            width=int(figsize[0] * 100)
+        )
+
+        # Add grid
+        fig.update_xaxes(showgrid=True, gridcolor='lightgray')
+        fig.update_yaxes(showgrid=True, gridcolor='lightgray')
 
         return fig
 
-    def plot_error_vs_time(self, error_data: pd.DataFrame, figsize: Tuple[int, int] = (8, 6)) -> plt.Figure:
-        """Plot percent errors vs time."""
-        fig, ax = plt.subplots(1, 1, figsize=figsize)
+    def plot_error_vs_time(self, error_data: pd.DataFrame, figsize: Tuple[int, int] = (8, 6)) -> go.Figure:
+        """Plot percent errors vs time using Plotly."""
+        fig = go.Figure()
 
         if not error_data.empty:
             # Separate active and inactive measurements
@@ -1115,23 +1338,54 @@ class RatingCurveAdjuster(BaseStationAnalyzer):
             inactive_data = error_data[~error_data['active']]
 
             if not active_data.empty:
-                ax.scatter(active_data['date'], active_data['percent_error'],
-                          c='blue', alpha=0.7, s=40, label='Active')
+                fig.add_trace(go.Scatter(
+                    x=active_data['date'],
+                    y=active_data['percent_error'],
+                    mode='markers',
+                    name='Active',
+                    marker=dict(color='blue', size=8, opacity=0.7),
+                    hovertemplate='<b>Date:</b> %{x}<br>' +
+                                '<b>Error:</b> %{y:.1f}%<br>' +
+                                '<b>Status:</b> Active<extra></extra>'
+                ))
 
             if not inactive_data.empty:
-                ax.scatter(inactive_data['date'], inactive_data['percent_error'],
-                          c='lightgray', alpha=0.5, s=30, label='Inactive')
+                fig.add_trace(go.Scatter(
+                    x=inactive_data['date'],
+                    y=inactive_data['percent_error'],
+                    mode='markers',
+                    name='Inactive',
+                    marker=dict(color='lightgray', size=6, opacity=0.5),
+                    hovertemplate='<b>Date:</b> %{x}<br>' +
+                                '<b>Error:</b> %{y:.1f}%<br>' +
+                                '<b>Status:</b> Inactive<extra></extra>'
+                ))
 
             # Add zero line
-            ax.axhline(y=0, color='red', linestyle='--', alpha=0.7)
+            fig.add_hline(
+                y=0,
+                line_dash="dash",
+                line_color="red",
+                opacity=0.7
+            )
 
-        ax.set_xlabel('Date')
-        ax.set_ylabel('Percent Error (%)')
-        ax.set_title('Rating Curve Errors vs Time')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        plt.xticks(rotation=45)
-        plt.tight_layout()
+        fig.update_layout(
+            xaxis_title="Date",
+            yaxis_title="Percent Error (%)",
+            title="Rating Curve Errors vs Time",
+            showlegend=True,
+            width=figsize[0]*100,
+            height=figsize[1]*100,
+            xaxis=dict(
+                showgrid=True,
+                gridcolor='rgba(128,128,128,0.3)',
+                tickangle=45
+            ),
+            yaxis=dict(
+                showgrid=True,
+                gridcolor='rgba(128,128,128,0.3)'
+            )
+        )
 
         return fig
 
@@ -1274,7 +1528,7 @@ class DashboardApp:
 
         if data_available:
             fig = self.timeseries_analyzer.plot_timeseries(plot_type)
-            st.pyplot(fig)
+            st.plotly_chart(fig, use_container_width=True)
 
             # Show rating curve table
             if len(self.timeseries_analyzer.rating_curves) > 0:
@@ -1345,7 +1599,7 @@ class DashboardApp:
             if selected_curves:
                 # Create scatter plot
                 fig = self.scatter_analyzer.plot_scatter(selected_plot, selected_curves)
-                st.pyplot(fig)
+                st.plotly_chart(fig, use_container_width=True)
 
                 # Data filtering info below the plot
                 curve_data = self.scatter_analyzer.get_data_by_rating_curve(selected_curves)
@@ -1461,7 +1715,7 @@ class DashboardApp:
                 fig = self.profile_analyzer.plot_selected_vertical_profiles(
                     selected_curve_id, filtered_survey_ids
                 )
-                st.pyplot(fig)
+                st.plotly_chart(fig, use_container_width=True)
 
                 # Profile data summary below plot
                 st.subheader("Profile Data Summary")
@@ -1739,7 +1993,7 @@ class DashboardApp:
             fig = self.curve_adjuster.plot_stage_discharge(
                 measurements, st.session_state.curve_segments, log_x, log_y
             )
-            st.pyplot(fig)
+            st.plotly_chart(fig, use_container_width=True)
 
         # Measurements table with toggles
         st.subheader("Measurements")
@@ -1827,11 +2081,11 @@ class DashboardApp:
 
         # Error vs Level plot
         fig1 = self.curve_adjuster.plot_error_vs_level(error_data, figsize=(6, 4))
-        st.pyplot(fig1)
+        st.plotly_chart(fig1, use_container_width=True)
 
         # Error vs Time plot
         fig2 = self.curve_adjuster.plot_error_vs_time(error_data, figsize=(6, 4))
-        st.pyplot(fig2)
+        st.plotly_chart(fig2, use_container_width=True)
 
 
 def main():
