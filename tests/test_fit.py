@@ -1,10 +1,9 @@
 import sys
 
 sys.path.append('scripts')
-sys.path.append('scripts/rc_adjust')
 
 from hydrodb import HydroDB
-from rc_fit import SegmentedPowerCurveFitter
+from rc_fit import Segment, SegmentedPowerCurveFitter
 
 # Test the implementation
 if __name__ == "__main__":
@@ -27,7 +26,7 @@ if __name__ == "__main__":
     # Define last segment: y = a * (x - x0)^n
     last_segment_params = {
         'a': 137.7506,      # Coefficient
-        'x0': 0.45, # 0.55,         # X offset
+        'x0': 0.55,         # X offset
         'n': 1.54,          # Power
         'x_start': 1.2      # Where this segment starts
     }
@@ -35,7 +34,7 @@ if __name__ == "__main__":
     x = data['level'].values
     y = data['discharge'].values
     # Create fitter with last segment
-    fitter = SegmentedPowerCurveFitter(x, y, last_segment_params)
+    fitter = SegmentedPowerCurveFitter(x, y)#, last_segment_params)
 
     result = fitter.fit_segments(n_segments=3)
 

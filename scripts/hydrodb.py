@@ -58,11 +58,39 @@ class HydroDB:
         df['datetime'] = pd.to_datetime(df['date'] + ' ' + df['time'])
 
         df['level'] /= 100 # Convert to meters
-        
-        # self.stage_discharge_data = {
-        #     'dates': df['datetime'].values,
-        #     'levels': df['level'].values,  # cm
-        #     'discharges': df['discharge'].values  # m3/s
-        # }
+
+        df = df[['datetime', 'level', 'discharge']]
+
+        return df
+
+    def load_rating_curve_data(self):
+        """
+        Load rating curve parameters from database for the station.
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with rating curve parameters including:
+            - start_date, end_date: validity period
+            - segment_number: segment identifier (XX/YY format)
+            - h_min, h_max: height range in cm
+            - h0_param, a_param, n_param: curve parameters for Q = a*(H-h0)^n
+            - date_inserted: when the record was added
+        """
+        conn = sqlite3.connect(self.db_path)
+
+        query = """
+        SELECT start_date, end_date, segment_number, h_min, h_max,
+               h0_param, a_param, n_param, date_inserted
+        FROM rating_curve
+        WHERE station_id = ?
+        ORDER BY start_date, segment_number
+        """
+
+        df = pd.read_sql_query(query, conn, params=[self.station_id])
+        conn.close()
+
+        if df.empty:
+            raise ValueError(f"No rating curve data found for station {self.station_id}")
 
         return df

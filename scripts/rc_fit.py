@@ -4,20 +4,21 @@ from scipy.special import huber
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
 
-@dataclass
 class Segment:
     """Represents a power function segment"""
-    a: float
-    x0: float
-    n: float
-    x_start: float
-    x_end: float
+    def __init__(self, a, x0, n, x_start, x_end):
+        self.a = round(a, 4)      # 4 decimal places
+        self.x0 = round(x0, 2)    # 2 decimal places
+        self.n = round(n, 3)      # 3 decimal places
+        self.x_start = round(x_start, 2)    # 2 decimal places
+        self.x_end = round(x_end, 2)        # 2 decimal places
     
     def evaluate(self, x):
         """Evaluate the power function at given x values"""
         return self.a * np.maximum(x - self.x0, 0) ** self.n
 
-class SegmentedPowerCurveFitter:
+
+class RatigCurveFitter:
     def __init__(self, x_data, y_data, last_segment_params=None):
         """
         Initialize the fitter
@@ -43,7 +44,7 @@ class SegmentedPowerCurveFitter:
         self.x_max = self.x_data.max()
         
     def create_objective_function(self,
-                                  loss_weight=5,
+                                  loss_weight=10,
                                   continuity_threshold=0.05,
                                   continuity_weight=100,
                                   min_segment_range=0.1,
@@ -51,7 +52,7 @@ class SegmentedPowerCurveFitter:
                                   min_points_per_segment=2,
                                   min_points_weight=1,
                                   param_deviation_weight=1,
-                                  n_deviation_weight=10,
+                                  n_deviation_weight=2,
                                   bias_weight=5,
                                   n_bias_bins=5):
         """
@@ -257,9 +258,9 @@ class SegmentedPowerCurveFitter:
                 n_init = self.last_segment_params['n']
             else:
                 # Fallback to simple initial guesses
-                a_init = np.mean(self.y_data)
-                x0_init = np.min(self.x_data) * 0.9
-                n_init = 1.5
+                a_init = np.mean(self.y_data) * 3
+                x0_init = np.min(self.x_data)
+                n_init = 1.7
 
             params.extend([a_init, x0_init, n_init])
 
@@ -281,13 +282,13 @@ class SegmentedPowerCurveFitter:
             # a: coefficient
             bounds.append((1, 1e4))
             # x0: offset in m
-            bounds.append((-100, 100))
+            bounds.append((self.x_min - abs(self.x_min*1.5), self.x_min + abs(self.x_min*1.5)))
             # n: power
             bounds.append((1.2, 5))
         
         return bounds
     
-    def fit_segments(self, n_segments, **obj_kwargs):
+    def fit_segments(self, n_segments, maxiter=1000, popsize=100, **obj_kwargs):
         """
         Fit curve with fixed number of segments
         
@@ -295,6 +296,10 @@ class SegmentedPowerCurveFitter:
         -----------
         n_segments: int
             Number of segments (1 to 5)
+        maxiter: int
+            differential evolution argument
+        popsize: int
+            differential evolution argument
         obj_kwargs: dict
             Arguments for objective function creation
         """
@@ -307,8 +312,8 @@ class SegmentedPowerCurveFitter:
             bounds,
             x0=initial_guess,
             seed=42,
-            maxiter=1000,
-            popsize=50,
+            maxiter=maxiter,
+            popsize=popsize,
             atol=1e-10,
             tol=1e-10
         )
@@ -325,7 +330,29 @@ class SegmentedPowerCurveFitter:
             'n_segments': n_segments
         }
     
-    def plot_results(self, result, show_components=True, figsize=(12, 8)):
+    def load_existing_segments(self, df):
+        """
+        Load rating curve data and convert to Segment objects
+        """
+
+        segments = []
+        for _, row in df.iterrows():
+            # Convert h_min, h_max from cm to meters
+            x_start = row['h_min'] / 100.0
+            x_end = row['h_max'] / 100.0
+
+            segment = Segment(
+                a=row['a_param'],
+                x0=row['h0_param'],
+                n=row['n_param'],
+                x_start=x_start,
+                x_end=x_end
+            )
+            segments.append(segment)
+
+        return segments
+
+    def plot_results(self, result, station="", show_components=True, figsize=(12, 8)):
         """
         Visualize the fitted curve and data with enhanced plotting style.
 
@@ -375,8 +402,9 @@ class SegmentedPowerCurveFitter:
         # Set main plot properties
         ax1.set_xlabel('Water Level')
         ax1.set_ylabel('Discharge')
-        ax1.set_title(f'Segmented Power Curve Fit\n'
-                     f'{len(segments)} segments - Objective: {result["objective"]:.2f}')
+        ax1.set_title(f'Station number: {station}\n'
+                      f'Segmented Power Curve Fit\n'
+                      f'{len(segments)} segments')
         ax1.grid(True, alpha=0.3)
         ax1.legend(loc='upper left', fontsize=9)
 
@@ -394,6 +422,12 @@ class SegmentedPowerCurveFitter:
 
             residuals = 100 * (y_fitted - self.y_data) / self.y_data
 
+            # Calculate metrics
+            mpe = np.mean(np.abs(residuals))  # Mean Percentage Error
+            bias = np.mean(residuals)  # Bias (mean residual)
+            positive_errors = np.sum(residuals > 0) / len(residuals) * 100  # % positive errors
+            negative_errors = np.sum(residuals < 0) / len(residuals) * 100  # % negative errors
+
             # Plot residuals
             ax2.scatter(self.x_data, residuals, alpha=0.6, color='blue', s=20)
             ax2.axhline(y=0, color='black', linestyle='-', alpha=0.7)
@@ -401,6 +435,12 @@ class SegmentedPowerCurveFitter:
             ax2.axhline(y=-10, color='red', linestyle='--', alpha=0.5)
             ax2.axhline(y=20, color='orange', linestyle='--', alpha=0.5, label='±20%')
             ax2.axhline(y=-20, color='orange', linestyle='--', alpha=0.5)
+
+            # Add metrics text box
+            metrics_text = f'MPE: {mpe:.1f}%\nBias: {bias:.1f}%\n+Errors: {positive_errors:.1f}%\n-Errors: {negative_errors:.1f}%'
+            ax1.text(0.98, 0.02, metrics_text,
+                    transform=ax1.transAxes, fontsize=10,
+                    va='bottom', ha='right', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
 
             ax2.set_xlabel('Water Level')
             ax2.set_ylabel('Residual (%)')
@@ -413,8 +453,10 @@ class SegmentedPowerCurveFitter:
             ax2.set_ylim(-min(50, residual_max * 1.2), min(50, residual_max * 1.2))
 
         plt.tight_layout()
+        plt.show()
 
         if show_components:
             return fig, (ax1, ax2)
         else:
             return fig, ax1
+        
