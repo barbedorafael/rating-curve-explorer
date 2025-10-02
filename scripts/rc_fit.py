@@ -22,35 +22,39 @@ class Segment:
         return self.a * np.maximum(x - self.x0, 0) ** self.n
 
 
-class RatigCurveFitter:
-    def __init__(self, x_data, y_data,
-                 last_segment_params=None, existing_curves=None, fixed_breakpoints=None,
-                 x_min=None, x_max=None,):
+class RatingCurveFitter:
+    def __init__(self, x_data, y_data, 
+                 existing_curves=None, 
+                 x_min=None, x_max=None,
+                 last_segment_parameters=None,
+                 fixed_breakpoints=None):
         """
-        Initialize the fitter
+        Initialize the rating curve optimization engine.
 
-        Parameters:
-        -----------
-        x_data, y_data: array-like
-            Data points to fit
-        last_segment_params: dict or None
-            Parameters for the last segment if predefined
-            Should contain: {'a': float, 'x0': float, 'n': float, 'x_start': float}
-        existing_curves: list of Segment objects, optional
-            Existing curves that the new curve should not cross
-        fixed_breakpoints: list of float, optional
-            Fixed breakpoint positions that should not be optimized
+        This class handles the complete rating curve workflow: data management,
+        optimization of segmented power-law curves with advanced penalty functions
+        for continuity, crossing prevention, and bias control.
+
+        Parameters
+        ----------
+        x_data, y_data : array-like
+            Measurement data points (water level and discharge)
+        existing_curves : list of Segment objects, optional
+            Pre-existing curve segments to include
+        x_min, x_max : float, optional
+            Domain boundaries. If not provided, computed from data
+
+        Notes
+        -----
+        Combines data management and optimization in a single class for simplicity.
         """
         self.x_data = np.array(x_data)
         self.y_data = np.array(y_data)
-        self.x_min = x_min
-        self.x_max = x_max
-        if not self.x_min:
-            self.x_min = self.x_data.min()
-        if not self.x_max:
-            self.x_max = self.x_data.max()
-        self.last_segment_params = last_segment_params
-        self.existing_curves = existing_curves or []
+        self.x_min = x_min if x_min is not None else self.x_data.min()
+        self.x_max = x_max if x_max is not None else self.x_data.max()
+        
+        self.curves = existing_curves or []
+        self.last_segment_parameters = last_segment_parameters or []
         self.fixed_breakpoints = fixed_breakpoints or []
 
         # Sort data by x
@@ -58,7 +62,38 @@ class RatigCurveFitter:
         self.x_data = self.x_data[idx]
         self.y_data = self.y_data[idx]
 
+    def load_segments(self, df):
+        """
+        Load rating curve data from DataFrame and convert to Segment objects.
 
+        Parameters
+        ----------
+        df : pandas.DataFrame
+            DataFrame containing rating curve parameters with columns:
+            - h_min, h_max : float (water levels in cm)
+            - a_param, h0_param, n_param : float (power law parameters)
+            - start_date, end_date : str (validity period for curve ID)
+
+        Notes
+        -----
+        Water levels are automatically converted from cm to meters.
+        Curve ID is created from start_date and end_date.
+        """
+
+        for _, row in df.iterrows():
+            # Convert h_min, h_max from cm to meters
+            x_start = row['h_min'] / 100.0
+            x_end = row['h_max'] / 100.0
+
+            segment = Segment(
+                a=row['a_param'],
+                x0=row['h0_param'],
+                n=row['n_param'],
+                x_start=x_start,
+                x_end=x_end,
+                cid=f"{row['start_date']}_{row['end_date']}"
+            )
+            self.curves.append(segment)
         
     def create_objective_function(self,
                                   loss_weight=10,
@@ -74,30 +109,44 @@ class RatigCurveFitter:
                                   n_bias_bins=5,
                                   curve_crossing_weight=20):
         """
-        Create a custom objective function with various criteria
+        Create a multi-criteria objective function for rating curve optimization.
 
-        Parameters:
-        -----------
-        loss_weight: float
-            Weight for loss function penalty (MPE)
-        continuity_weight: float
-            Weight for continuity violation penalty
-        min_segment_range: float or None
-            Minimum x-range each segment must cover (prevents tiny segments)
-        min_range_weight: float
-            Weight for penalty when segment x-range is too small
-        min_points_per_segment: int
-            Minimum number of data points each segment must cover
-        min_points_weight: float
-            Weight for penalty when segments have too few points
-        param_deviation_weight: float
-            Weight for penalty when segment parameters deviate from reference
-        n_deviation_weight: float
-            Additional weight specifically for 'n' parameter deviations
-        bias_weight: float
-            Weight for bias penalty to balance errors across x-values
-        n_bias_bins: int
-            Number of bins for bias penalty calculation
+        Constructs a sophisticated objective function that balances multiple goals:
+        data fitting, curve continuity, segment validity, bias control, and
+        crossing prevention with existing curves.
+
+        Parameters
+        ----------
+        loss_weight : float, default 10
+            Weight for primary loss function (Mean Percentage Error)
+        continuity_threshold : float, default 0.01
+            Maximum allowed relative discontinuity at breakpoints (1%)
+        continuity_weight : float, default 100
+            Penalty weight for continuity violations
+        min_segment_range : float, default 0.1
+            Minimum x-range each segment must cover (prevents degenerate segments)
+        min_range_weight : float, default 1
+            Penalty weight for segments below minimum range
+        min_points_per_segment : int, default 2
+            Minimum data points required per segment
+        min_points_weight : float, default 1
+            Penalty weight for segments with insufficient data points
+        param_deviation_weight : float, default 1
+            Penalty for parameter deviations from reference values
+        n_deviation_weight : float, default 2
+            Additional penalty specifically for exponent (n) parameter deviations
+        bias_weight : float, default 5
+            Weight for bias penalty to balance errors across domain
+        n_bias_bins : int, default 5
+            Number of bins for bias calculation using percentile-based binning
+        curve_crossing_weight : float, default 20
+            Penalty weight for preventing intersection with existing curves
+
+        Returns
+        -------
+        callable
+            Objective function that takes (params, n_segments, return_components=False)
+            and returns scalar cost or detailed component breakdown
         """
         
         def objective(params, n_segments, return_components=False):
@@ -265,7 +314,26 @@ class RatigCurveFitter:
         return objective
     
     def params_to_segments(self, params, n_segments):
-        """Convert parameter array to segment objects"""
+        """
+        Convert optimization parameter array to Segment objects.
+
+        Handles both fixed and variable breakpoints, assembling the complete
+        segmented curve from the optimized parameters.
+
+        Parameters
+        ----------
+        params : array-like
+            Flattened parameter array from optimizer containing:
+            - Variable breakpoints (if any)
+            - Segment parameters (a, x0, n) for each optimized segment
+        n_segments : int
+            Total number of segments in the curve
+
+        Returns
+        -------
+        list of Segment
+            Complete list of segments with proper boundaries and parameters
+        """
         segments = []
 
         if n_segments == 1:
@@ -312,7 +380,22 @@ class RatigCurveFitter:
         return segments
     
     def get_initial_guess(self, n_segments):
-        """Generate initial guess for parameters"""
+        """
+        Generate intelligent initial parameter guesses for optimization.
+
+        Creates reasonable starting points for breakpoints and segment parameters
+        while respecting fixed breakpoints and predefined segments.
+
+        Parameters
+        ----------
+        n_segments : int
+            Number of segments to create initial guess for
+
+        Returns
+        -------
+        numpy.ndarray
+            Flattened parameter array ready for optimization
+        """
         params = []
 
         if n_segments > 1:
@@ -353,9 +436,24 @@ class RatigCurveFitter:
             params.extend([a_init, x0_init, n_init])
 
         return np.array(params)
-    
+
     def get_bounds(self, n_segments):
-        """Get parameter bounds for optimization"""
+        """
+        Define optimization bounds for all parameters.
+
+        Establishes reasonable constraints for breakpoints and segment parameters
+        to guide the optimization algorithm and prevent unrealistic solutions.
+
+        Parameters
+        ----------
+        n_segments : int
+            Number of segments to create bounds for
+
+        Returns
+        -------
+        list of tuple
+            Bounds for each parameter as (min, max) tuples
+        """
         bounds = []
 
         if n_segments > 1:
@@ -380,18 +478,39 @@ class RatigCurveFitter:
     
     def fit_segments(self, n_segments, maxiter=1000, popsize=100, **obj_kwargs):
         """
-        Fit curve with fixed number of segments
-        
-        Parameters:
-        -----------
-        n_segments: int
-            Number of segments (1 to 5)
-        maxiter: int
-            differential evolution argument
-        popsize: int
-            differential evolution argument
-        obj_kwargs: dict
-            Arguments for objective function creation
+        Fit segmented rating curve using advanced differential evolution.
+
+        This is the main optimization entry point that orchestrates the entire
+        fitting process, from initial guesses through bounds checking to final
+        segment creation and validation.
+
+        Parameters
+        ----------
+        n_segments : int, range 1-5
+            Number of segments to fit to the data
+        maxiter : int, default 1000
+            Maximum number of optimization iterations
+        popsize : int, default 100
+            Population size for differential evolution (affects search diversity)
+        **obj_kwargs : dict
+            Additional keyword arguments passed to create_objective_function()
+            for customizing penalty weights and optimization behavior
+
+        Returns
+        -------
+        dict
+            Fitting results containing:
+            - 'segments': List of fitted Segment objects
+            - 'params': Raw optimization parameters
+            - 'objective': Final objective function value
+            - 'components': Detailed breakdown of penalty components
+            - 'success': Boolean indicating optimization convergence
+            - 'n_segments': Number of segments fitted
+
+        Notes
+        -----
+        Automatically adds fitted segments to the RatingCurves instance for
+        future curve crossing prevention.
         """
         objective = self.create_objective_function(**obj_kwargs)
         initial_guess = self.get_initial_guess(n_segments)
@@ -410,7 +529,9 @@ class RatigCurveFitter:
         
         segments = self.params_to_segments(result.x, n_segments)
         components = objective(result.x, n_segments, return_components=True)
-        self.existing_curves.extend(segments)
+
+        # Add the new fitted curve to the existing ones
+        self.curves.extend(segments)
 
         return {
             'segments': segments,
@@ -420,147 +541,20 @@ class RatigCurveFitter:
             'success': result.success,
             'n_segments': n_segments
         }
-    
-    def load_existing_segments(self, df):
-        """
-        Load rating curve data and convert to Segment objects
-        """
-
-        for _, row in df.iterrows():
-            # Convert h_min, h_max from cm to meters
-            x_start = row['h_min'] / 100.0
-            x_end = row['h_max'] / 100.0
-
-            segment = Segment(
-                a=row['a_param'],
-                x0=row['h0_param'],
-                n=row['n_param'],
-                x_start=x_start,
-                x_end=x_end,
-                cid=f"{row['start_date']}_{row['end_date']}"
-            )
-            self.existing_curves.append(segment)
-
-    def plot_results(self, result, station="", show_components=True, figsize=(12, 8)):
-        """
-        Visualize the fitted curve and data with enhanced plotting style.
-
-        Parameters
-        ----------
-        result : dict
-            Result from fit_segments containing segments and fitting info
-        show_components : bool, default True
-            Whether to show residual plot as subplot
-        figsize : tuple, default (12, 8)
-            Figure size (width, height) in inches
-        """
-        # Create subplots
-        if show_components:
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=figsize, height_ratios=[3, 1])
-        else:
-            fig, ax1 = plt.subplots(figsize=figsize)
-            ax2 = None
-
-        # Plot observed data
-        ax1.scatter(self.x_data, self.y_data, alpha=0.6, color='black', s=30,
-                   label='Observed', zorder=3)
-
-        # Generate smooth curve for plotting fitted segments
-        x_plot = np.linspace(self.x_min, self.x_max, 500)
-        segments = result['segments']
-
-        # Plot each segment with different colors
-        colors = plt.cm.Set1(np.linspace(0, 1, len(segments)))
-
-        for i, seg in enumerate(segments):
-            # Create x range for this segment
-            mask = (x_plot >= seg.x_start) & (x_plot <= seg.x_end)
-            x_seg = x_plot[mask]
-
-            if len(x_seg) > 0:
-                y_seg = seg.evaluate(x_seg)
-
-                ax1.plot(x_seg, y_seg, color=colors[i], linewidth=2,
-                        label=f"Segment {i+1}: Q = {seg.a:.2f}×(X-{seg.x0:.2f})^{seg.n:.2f}")
-
-                # Add vertical lines at segment boundaries
-                if i < len(segments) - 1:
-                    boundary_x = seg.x_end
-                    ax1.axvline(boundary_x, color=colors[i], linestyle='--', alpha=0.7)
-
-        # Set main plot properties
-        ax1.set_xlabel('Water Level')
-        ax1.set_ylabel('Discharge')
-        ax1.set_title(f'Station number: {station}\n'
-                      f'Segmented Power Curve Fit\n'
-                      f'{len(segments)} segments')
-        ax1.grid(True, alpha=0.3)
-        ax1.legend(loc='upper left', fontsize=9)
-
-        # Log scale for better visualization
-        ax1.set_yscale('log')
-
-        if show_components and ax2 is not None:
-            # Calculate residuals
-            y_fitted = np.zeros_like(self.y_data)
-            for i, x in enumerate(self.x_data):
-                for seg in segments:
-                    if seg.x_start <= x <= seg.x_end:
-                        y_fitted[i] = seg.evaluate(x)
-                        break
-
-            residuals = 100 * (y_fitted - self.y_data) / self.y_data
-
-            # Calculate metrics
-            mpe = np.mean(np.abs(residuals))  # Mean Percentage Error
-            bias = np.mean(residuals)  # Bias (mean residual)
-            positive_errors = np.sum(residuals > 0) / len(residuals) * 100  # % positive errors
-            negative_errors = np.sum(residuals < 0) / len(residuals) * 100  # % negative errors
-
-            # Plot residuals
-            ax2.scatter(self.x_data, residuals, alpha=0.6, color='blue', s=20)
-            ax2.axhline(y=0, color='black', linestyle='-', alpha=0.7)
-            ax2.axhline(y=10, color='red', linestyle='--', alpha=0.5, label='±10%')
-            ax2.axhline(y=-10, color='red', linestyle='--', alpha=0.5)
-            ax2.axhline(y=20, color='orange', linestyle='--', alpha=0.5, label='±20%')
-            ax2.axhline(y=-20, color='orange', linestyle='--', alpha=0.5)
-
-            # Add metrics text box
-            metrics_text = f'MPE: {mpe:.1f}%\nBias: {bias:.1f}%\n+Errors: {positive_errors:.1f}%\n-Errors: {negative_errors:.1f}%'
-            ax1.text(0.98, 0.02, metrics_text,
-                    transform=ax1.transAxes, fontsize=10,
-                    va='bottom', ha='right', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
-
-            ax2.set_xlabel('Water Level')
-            ax2.set_ylabel('Residual (%)')
-            ax2.set_title('Residuals (Fitted - Observed)/Observed × 100%')
-            ax2.grid(True, alpha=0.3)
-            ax2.legend(loc='upper right')
-
-            # Set reasonable y-limits for residuals
-            residual_max = np.max(np.abs(residuals))
-            ax2.set_ylim(-min(50, residual_max * 1.2), min(50, residual_max * 1.2))
-
-        plt.tight_layout()
-        plt.show()
-
-        if show_components:
-            return fig, (ax1, ax2)
-        else:
-            return fig, ax1
 
     def plot_curves(self, station="", show_residuals=True, width=1000, height=700):
         """
-        Plot multiple rating curves using Plotly with interactive features.
+        Create interactive multi-curve visualization using Plotly.
+
+        Groups segments by curve ID and creates an interactive plot showing all curves
+        with their residuals. Features include zoom, pan, and curve toggle functionality.
 
         Parameters
         ----------
         station : str, optional
-            Station identifier for title
+            Station identifier for plot title
         show_residuals : bool, default True
-            Whether to show residual subplot
-        domain_expansion : float, default 0.5
-            Factor to expand plotting domain beyond measurements (0.5 = 50% each side)
+            Whether to include residual subplot below main plot
         width : int, default 1000
             Plot width in pixels
         height : int, default 700
@@ -569,18 +563,23 @@ class RatigCurveFitter:
         Returns
         -------
         plotly.graph_objects.Figure
-            Interactive Plotly figure
+            Interactive Plotly figure with zoom, pan, and toggle capabilities
+
+        Notes
+        -----
+        - Curves are automatically grouped by their curve ID (cid)
+        - Each curve gets a unique color and legend entry
+        - Residuals are calculated and displayed for each curve
+        - Reference lines show ±10% and ±20% error bounds
         """
 
         # Group segments by curve ID
         curves_by_cid = {}
-        for seg in self.existing_curves:
+        for seg in self.curves:
             cid = seg.cid if seg.cid is not None else 'Default'
             if cid not in curves_by_cid:
                 curves_by_cid[cid] = []
             curves_by_cid[cid].append(seg)
-        
-        print(curves_by_cid)
 
         # Create subplots if residuals requested and data available
         if show_residuals and self.x_data is not None and self.y_data is not None:
@@ -588,8 +587,8 @@ class RatigCurveFitter:
                 rows=2, cols=1,
                 row_heights=[0.75, 0.25],
                 subplot_titles=['Rating Curves', ''],
-                vertical_spacing=0.09,  # Increased spacing to prevent text overlap
-                shared_xaxes=True
+                vertical_spacing=0.12,  # Increased spacing to prevent text overlap
+                shared_xaxes=False  # Don't share x-axes to show ticks on both
             )
             main_row = 1
             residual_row = 2
@@ -752,3 +751,134 @@ class RatigCurveFitter:
             fig.update_yaxes(title_text="Discharge (m³/s)", type="log")
 
         return fig
+
+    def plot_results(self, cid, station="", show_components=True, figsize=(12, 8)):
+        """
+        Visualize a single rating curve with comprehensive data analysis.
+
+        Parameters
+        ----------
+        cid : str
+            Curve ID to plot (specific curve to analyze)
+        station : str, optional
+            Station identifier for title
+        show_components : bool, default True
+            Whether to show residual plot as subplot
+        figsize : tuple, default (12, 8)
+            Figure size (width, height) in inches
+        """
+        # Get segments for the specified curve ID
+        segments = [seg for seg in self.curves if seg.cid == cid]
+
+        if not segments:
+            print(f"No segments found for curve ID: {cid}")
+            available_cids = list(set(seg.cid for seg in self.curves))
+            print(f"Available curve IDs: {available_cids}")
+            return None
+
+        # Create subplots
+        if show_components:
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=figsize, height_ratios=[3, 1])
+        else:
+            fig, ax1 = plt.subplots(figsize=figsize)
+            ax2 = None
+
+        # Plot observed data
+        ax1.scatter(self.x_data, self.y_data, alpha=0.6, color='black', s=30,
+                   label='Observed', zorder=3)
+
+        # Generate smooth curve for plotting fitted segments
+        x_plot = np.linspace(self.x_min, self.x_max, 500)
+
+        # Plot each segment with different colors
+        colors = plt.cm.Set1(np.linspace(0, 1, len(segments)))
+
+        for i, seg in enumerate(segments):
+            # Create x range for this segment
+            mask = (x_plot >= seg.x_start) & (x_plot <= seg.x_end)
+            x_seg = x_plot[mask]
+
+            if len(x_seg) > 0:
+                y_seg = seg.evaluate(x_seg)
+
+                ax1.plot(x_seg, y_seg, color=colors[i], linewidth=2,
+                        label=f"Segment {i+1}: Q = {seg.a:.2f}×(H-{seg.x0:.2f})^{seg.n:.2f}")
+
+                # Add vertical lines at segment boundaries
+                if i < len(segments) - 1:
+                    boundary_x = seg.x_end
+                    ax1.axvline(boundary_x, color=colors[i], linestyle='--', alpha=0.7)
+
+        # Set main plot properties
+        ax1.set_xlabel('Water Level (m)')
+        ax1.set_ylabel('Discharge (m³/s)')
+        ax1.set_title(f'Rating Curve Analysis - Station {station}\n'
+                      f'Curve ID: {cid}\n'
+                      f'{len(segments)} segments')
+        ax1.grid(True, alpha=0.3)
+        ax1.legend(loc='upper left', fontsize=9)
+
+        # Log scale for better visualization
+        ax1.set_yscale('log')
+
+        if show_components and ax2 is not None:
+            # Calculate residuals for this specific curve
+            y_fitted = np.zeros_like(self.y_data)
+            for i, x in enumerate(self.x_data):
+                for seg in segments:
+                    if seg.x_start <= x <= seg.x_end:
+                        y_fitted[i] = seg.evaluate(x)
+                        break
+
+            residuals = 100 * (y_fitted - self.y_data) / self.y_data
+
+            # Calculate comprehensive metrics
+            mpe = np.mean(np.abs(residuals))  # Mean Percentage Error
+            bias = np.mean(residuals)  # Bias (mean residual)
+            rmse = np.sqrt(np.mean(residuals**2))  # Root Mean Square Error
+            positive_errors = np.sum(residuals > 0) / len(residuals) * 100  # % positive errors
+            negative_errors = np.sum(residuals < 0) / len(residuals) * 100  # % negative errors
+
+            # Additional statistics
+            within_10pct = np.sum(np.abs(residuals) <= 10) / len(residuals) * 100
+            within_20pct = np.sum(np.abs(residuals) <= 20) / len(residuals) * 100
+            max_error = np.max(np.abs(residuals))
+
+            # Plot residuals
+            ax2.scatter(self.x_data, residuals, alpha=0.6, color='blue', s=20)
+            ax2.axhline(y=0, color='black', linestyle='-', alpha=0.7)
+            ax2.axhline(y=10, color='red', linestyle='--', alpha=0.5, label='±10%')
+            ax2.axhline(y=-10, color='red', linestyle='--', alpha=0.5)
+            ax2.axhline(y=20, color='orange', linestyle='--', alpha=0.5, label='±20%')
+            ax2.axhline(y=-20, color='orange', linestyle='--', alpha=0.5)
+
+            # Enhanced metrics text box
+            metrics_text = (f'MPE: {mpe:.1f}%\n'
+                          f'Bias: {bias:.1f}%\n'
+                          f'RMSE: {rmse:.1f}%\n'
+                          f'Max Error: {max_error:.1f}%\n'
+                          f'Within ±10%: {within_10pct:.1f}%\n'
+                          f'Within ±20%: {within_20pct:.1f}%')
+
+            ax1.text(0.98, 0.02, metrics_text,
+                    transform=ax1.transAxes, fontsize=9,
+                    va='bottom', ha='right',
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+
+            ax2.set_xlabel('Water Level (m)')
+            ax2.set_ylabel('Residual (%)')
+            ax2.set_title('Residuals (Fitted - Observed)/Observed × 100%')
+            ax2.grid(True, alpha=0.3)
+            ax2.legend(loc='upper right')
+
+            # Set reasonable y-limits for residuals
+            residual_max = np.max(np.abs(residuals))
+            ax2.set_ylim(-min(50, residual_max * 1.2), min(50, residual_max * 1.2))
+
+        plt.tight_layout()
+        plt.show()
+
+        if show_components:
+            return fig, (ax1, ax2)
+        else:
+            return fig, ax1
