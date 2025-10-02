@@ -60,7 +60,7 @@ extrapolation_params = { # Second to last extrapolation segment
 }
 
 # init Fitter
-fitter = RatigCurveFitter(x, y, extrapolation_params)
+fitter = RatigCurveFitter(x, y, extrapolation_params, x_max=6)
 
 # Analyze current adjustment (raw)
 existing_segments = fitter.load_existing_segments(current_rc)
@@ -69,7 +69,7 @@ existing_result = {
     'n_segments': len(existing_segments),
 }
 
-print("\nPlotting current rating curve...")
+print("\nCurrent rating curve...")
 fitter.plot_results(existing_result, str(station_id))
 
 # Analyze previous adjustment (consisted)
@@ -79,6 +79,10 @@ existing_result = {
     'n_segments': len(existing_segments),
 }
 
-print("\nPlotting previous rating curve...")
+print("\nPrevious rating curve...")
 fitter.plot_results(existing_result, str(station_id))
 
+# Fit new curve for entire period
+result = fitter.fit_segments(n_segments=2)
+print("\nNew adjusted rating curve...")
+fitter.plot_results(result, str(station_id))

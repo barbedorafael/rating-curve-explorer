@@ -15,20 +15,19 @@ def summarize_segments(df):
     print()
 
 
-    print(f"Rating Curve Adjuster for station {station_id}")
-    print("=" * 60)
-
 db_path = "data/hydrodata.sqlite"
-station_id = 75900000
+station_id = 1
 station = HydroDB(db_path, station_id)
 
 rcs = station.load_rating_curve_data()
 current_date = rcs['start_date'].max()
 current_rc = rcs[rcs['start_date'] == current_date]
-previous_date = '2007-12-01'
+previous_date = '2019-06-08'
 previous_rc = rcs[rcs['start_date'] == previous_date]
 extrapolation_segments = rcs[rcs['segment_number'].str.split('/').str[0] == rcs['segment_number'].str.split('/').str[1]]
 
+print(f"Rating Curve Adjuster for station {station_id}")
+print("=" * 60)
 print("Rating Curve Data:")
 print(f"Total curves found: {len(rcs)}")
 print()
@@ -42,7 +41,7 @@ summarize_segments(extrapolation_segments)
 # Load stage-discharge data
 print("Loading stage-discharge data...")
 data = station.load_stage_discharge_data(
-    start_date='2022-01-01',#previous_date, # Trying to adjust last curve to current data
+    start_date=previous_date, # Trying to adjust last curve to current data
     end_date=current_rc.iloc[0].end_date)
 print(f"Loaded {len(data['level'])} measurements")
 print(f"Level range: {data['level'].min():.2f} - {data['level'].max():.2f} m")
