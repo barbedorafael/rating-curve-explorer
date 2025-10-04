@@ -26,7 +26,7 @@ class RatingCurveFitter:
     def __init__(self, x_data, y_data, 
                  existing_curves=None, 
                  x_min=None, x_max=None,
-                 last_segment_parameters=None,
+                 last_segment_params=None,
                  fixed_breakpoints=None):
         """
         Initialize the rating curve optimization engine.
@@ -53,8 +53,8 @@ class RatingCurveFitter:
         self.x_min = x_min if x_min is not None else self.x_data.min()
         self.x_max = x_max if x_max is not None else self.x_data.max()
         
-        self.curves = existing_curves or []
-        self.last_segment_parameters = last_segment_parameters or []
+        self.existing_curves = existing_curves or []
+        self.last_segment_params = last_segment_params or []
         self.fixed_breakpoints = fixed_breakpoints or []
 
         # Sort data by x
@@ -62,7 +62,7 @@ class RatingCurveFitter:
         self.x_data = self.x_data[idx]
         self.y_data = self.y_data[idx]
 
-    def load_segments(self, df):
+    def load_rcs(self, df):
         """
         Load rating curve data from DataFrame and convert to Segment objects.
 
@@ -93,7 +93,7 @@ class RatingCurveFitter:
                 x_end=x_end,
                 cid=f"{row['start_date']}_{row['end_date']}"
             )
-            self.curves.append(segment)
+            self.existing_curves.append(segment)
         
     def create_objective_function(self,
                                   loss_weight=10,
@@ -107,7 +107,7 @@ class RatingCurveFitter:
                                   n_deviation_weight=2,
                                   bias_weight=5,
                                   n_bias_bins=5,
-                                  curve_crossing_weight=20):
+                                  curve_crossing_weight=10):
         """
         Create a multi-criteria objective function for rating curve optimization.
 
@@ -531,7 +531,7 @@ class RatingCurveFitter:
         components = objective(result.x, n_segments, return_components=True)
 
         # Add the new fitted curve to the existing ones
-        self.curves.extend(segments)
+        self.existing_curves.extend(segments)
 
         return {
             'segments': segments,
@@ -575,7 +575,7 @@ class RatingCurveFitter:
 
         # Group segments by curve ID
         curves_by_cid = {}
-        for seg in self.curves:
+        for seg in self.existing_curves:
             cid = seg.cid if seg.cid is not None else 'Default'
             if cid not in curves_by_cid:
                 curves_by_cid[cid] = []
@@ -768,11 +768,11 @@ class RatingCurveFitter:
             Figure size (width, height) in inches
         """
         # Get segments for the specified curve ID
-        segments = [seg for seg in self.curves if seg.cid == cid]
+        segments = [seg for seg in self.existing_curves if seg.cid == cid]
 
         if not segments:
             print(f"No segments found for curve ID: {cid}")
-            available_cids = list(set(seg.cid for seg in self.curves))
+            available_cids = list(set(seg.cid for seg in self.existing_curves))
             print(f"Available curve IDs: {available_cids}")
             return None
 

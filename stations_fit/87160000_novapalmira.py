@@ -3,7 +3,7 @@ import sys
 sys.path.append('scripts')
 
 from hydrodb import HydroDB
-from rc_fit import RatigCurveFitter
+from rc_fit import RatingCurveFitter
 
 def summarize_segments(df):
 
@@ -59,8 +59,9 @@ extrapolation_params = { # Second to last extrapolation segment
 }
 
 # init Fitter
-fitter = RatigCurveFitter(x, y, extrapolation_params, x_min=0.9, x_max=9.0)
-fitter.load_existing_segments(rcs)
+
+fitter = RatingCurveFitter(x, y, x_min=0.9, x_max=9.0, last_segment_params=extrapolation_params)
+fitter.load_rcs(rcs)
 
 # # Analyze current adjustment (raw)
 # existing_segments = fitter.load_existing_segments(current_rc)
@@ -79,16 +80,16 @@ fitter.load_existing_segments(rcs)
 #     'n_segments': len(existing_segments),
 # }
 
-print("\nPlotting previous rating curve...")
+# print("\nPlotting previous rating curve...")
 # fitter.plot_results(existing_result, str(station_id))
 
 # Fit new curve
-# result = fitter.fit_segments(n_segments=2)
-# print("\nNew adjusted rating curve...")
-# fitter.plot_results(result, str(station_id))
+result = fitter.fit_segments(n_segments=2, curve_crossing_weight=0)
+print("\nNew adjusted rating curve...")
+fitter.plot_results('new', str(station_id))
 
-# for segment in result['segments']:
-#     print(segment.__dict__)
+for segment in result['segments']:
+    print(segment.__dict__)
 
 
 fitter.plot_curves()
