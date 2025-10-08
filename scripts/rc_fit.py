@@ -6,7 +6,6 @@ from dataclasses import dataclass
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import plotly.colors as colors
-from datetime import datetime
 import pandas as pd
 
 class Segment:
@@ -55,7 +54,7 @@ class RatingCurveFitter:
         Combines data management and optimization in a single class for simplicity.
         """
         
-        self.dates = np.array(data.datetime.dt.to_pydatetime())
+        self.dates = np.array(data.date)
         self.x_data = np.array(data.level)
         self.y_data = np.array(data.discharge)
         self.x_min = x_min if x_min is not None else self.x_data.min()
@@ -550,30 +549,6 @@ class RatingCurveFitter:
             'success': result.success,
             'n_segments': n_segments
         }
-
-    def _parse_curve_dates(self, cid):
-        """
-        Parse curve ID to extract start and end dates.
-
-        Parameters
-        ----------
-        cid : str
-            Curve ID in format 'YYYY-MM-DD_YYYY-MM-DD'
-
-        Returns
-        -------
-        tuple of datetime
-            (start_date, end_date) or (None, None) if parsing fails
-        """
-        try:
-            if '_' in cid:
-                start_str, end_str = cid.split('_')
-                start_date = datetime.strptime(start_str, '%Y-%m-%d')
-                end_date = datetime.strptime(end_str, '%Y-%m-%d')
-                return start_date, end_date
-        except (ValueError, TypeError):
-            pass
-        return None, None
     
     def plot_curves(self, station="", show_residuals=True, width=1000, height=700):
         """
@@ -640,11 +615,6 @@ class RatingCurveFitter:
 
         # Plot measurement data with date information in hover
         if self.x_data is not None and self.y_data is not None:
-            # Convert dates to strings for hover display
-            date_strings = []
-            for d in self.dates:
-                date_strings.append(d.strftime('%Y-%m-%d'))
-
             scatter_trace = go.Scatter(
                 x=self.x_data,
                 y=self.y_data,
@@ -655,7 +625,7 @@ class RatingCurveFitter:
                     size=6,
                     opacity=0.7
                 ),
-                customdata=date_strings,
+                customdata=self.dates,
                 hovertemplate='<b>Measurement</b><br>Date: %{customdata}<br>H: %{x:.2f} m<br>Q: %{y:.2f} m³/s<extra></extra>',
                 showlegend=True
             )
@@ -683,10 +653,6 @@ class RatingCurveFitter:
                     if len(x_seg) > 0:
                         y_seg = seg.evaluate(x_seg)
 
-                        # Create segment name and info
-                        segment_name = f'{curve_id}'
-                        equation_text = f'Q = {seg.a:.3f}×(H-{seg.x0:.2f})^{seg.n:.3f}'
-
                         segment_trace = go.Scatter(
                             x=x_seg,
                             y=y_seg,
@@ -712,13 +678,13 @@ class RatingCurveFitter:
                 self.x_data is not None and self.y_data is not None and self.dates is not None):
 
                 # Parse curve validity dates
-                start_date, end_date = self._parse_curve_dates(curve_id)
+                start_date, end_date = curve_id.split('_')
 
                 if start_date is not None and end_date is not None:
                     
                     # Find measurements within curve validity period
                     valid_mask = np.array([
-                        d is not None and start_date <= d <= end_date
+                        d is not None and start_date <= d < end_date
                         for d in self.dates
                     ])
 
@@ -739,9 +705,6 @@ class RatingCurveFitter:
                         # Calculate residuals
                         residuals_valid = 100 * (y_fitted_valid - y_valid) / y_valid
 
-                        # Prepare hover data
-                        date_strings_valid = [d.strftime('%Y-%m-%d') if hasattr(d, 'strftime') else str(d) for d in dates_valid]
-
                         residual_trace = go.Scatter(
                             x=x_valid,
                             y=residuals_valid,
@@ -752,7 +715,7 @@ class RatingCurveFitter:
                                 size=5,
                                 opacity=0.7
                             ),
-                            customdata=date_strings_valid,
+                            customdata=dates_valid,
                             hovertemplate=f'<b>{curve_id} Residuals</b><br>Date: %{{customdata}}<br>H: %{{x:.2f}} m<br>Residual: %{{y:.1f}}%<extra></extra>',
                             legendgroup=curve_id,
                             showlegend=False
@@ -770,7 +733,6 @@ class RatingCurveFitter:
                                 break
 
                     residuals = 100 * (y_fitted - self.y_data) / self.y_data
-                    date_strings = [d.strftime('%Y-%m-%d') if hasattr(d, 'strftime') else str(d) for d in self.dates]
 
                     residual_trace = go.Scatter(
                         x=self.x_data,
@@ -782,7 +744,7 @@ class RatingCurveFitter:
                             size=5,
                             opacity=0.7
                         ),
-                        customdata=date_strings,
+                        customdata=self.dates,
                         hovertemplate=f'<b>{curve_id} Residuals</b><br>Date: %{{customdata}}<br>H: %{{x:.2f}} m<br>Residual: %{{y:.1f}}%<extra></extra>',
                         legendgroup=curve_id,
                         showlegend=False
@@ -928,7 +890,7 @@ class RatingCurveFitter:
             residuals = 100 * (y_fitted - self.y_data) / self.y_data
 
             # Calculate comprehensive metrics
-            mpe = np.mean(np.abs(residuals))  # Mean Percentage Error
+            mape = np.mean(np.abs(residuals))  # Mean Percentage Error
             bias = np.mean(residuals)  # Bias (mean residual)
             positive_errors = np.sum(residuals > 0) / len(residuals) * 100  # % positive errors
             negative_errors = np.sum(residuals < 0) / len(residuals) * 100  # % negative errors
@@ -947,11 +909,11 @@ class RatingCurveFitter:
             ax2.axhline(y=-20, color='orange', linestyle='--', alpha=0.5)
 
             # Enhanced metrics text box
-            metrics_text = (f'MPE: {mpe:.1f}%\n'
+            metrics_text = (f'MAPE: {mape:.1f}%\n'
                           f'Bias: {bias:.1f}%\n'
                           f'Max Error: {max_error:.1f}%\n'
                           f'% Positives: {positive_errors:.1f}%\n'
-                          f'% Negatives: {negative_errors:.1f}%'
+                          f'% Negatives: {negative_errors:.1f}%\n'
                           f'Within ±10%: {within_10pct:.1f}%\n'
                           f'Within ±20%: {within_20pct:.1f}%')
 

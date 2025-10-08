@@ -54,12 +54,9 @@ class HydroDB:
         if df.empty:
             raise ValueError(f"No stage-discharge data found for station {self.station_id}")
 
-        # Convert date strings to datetime objects
-        df['datetime'] = pd.to_datetime(df['date'] + ' ' + df['time'])
-
         df['level'] /= 100 # Convert to meters
 
-        df = df[['datetime', 'level', 'discharge']]
+        df = df[['date', 'level', 'discharge']]
 
         return df
 
