@@ -3,7 +3,7 @@ import sys
 sys.path.append('scripts')
 
 from hydrodb import HydroDB
-from rc_fit import RatigCurveFitter
+from rc_fit import RatingCurveFitter
 
 def summarize_segments(df):
 
@@ -15,20 +15,20 @@ def summarize_segments(df):
     print()
 
 
-    print(f"Rating Curve Adjuster for station {station_id}")
-    print("=" * 60)
-
 db_path = "data/hydrodata.sqlite"
-station_id = 75900000
+station_id = 87170000
 station = HydroDB(db_path, station_id)
 
 rcs = station.load_rating_curve_data()
-current_date = rcs['start_date'].max()
+dates = rcs['start_date'].unique()
+current_date = dates[-1]
 current_rc = rcs[rcs['start_date'] == current_date]
-previous_date = '2007-12-01'
+previous_date = dates[-2]
 previous_rc = rcs[rcs['start_date'] == previous_date]
 extrapolation_segments = rcs[rcs['segment_number'].str.split('/').str[0] == rcs['segment_number'].str.split('/').str[1]]
 
+print(f"Rating Curve Adjuster for station {station_id}")
+print("=" * 60)
 print("Rating Curve Data:")
 print(f"Total curves found: {len(rcs)}")
 print()
@@ -42,43 +42,49 @@ summarize_segments(extrapolation_segments)
 # Load stage-discharge data
 print("Loading stage-discharge data...")
 data = station.load_stage_discharge_data(
-    start_date='2022-01-01',#previous_date, # Trying to adjust last curve to current data
+    start_date='2023-08-20',
     end_date=current_rc.iloc[0].end_date)
 print(f"Loaded {len(data['level'])} measurements")
 print(f"Level range: {data['level'].min():.2f} - {data['level'].max():.2f} m")
 print(f"Discharge range: {data['discharge'].min():.2f} - {data['discharge'].max():.2f} m³/s")
 
-x = data['level'].values
-y = data['discharge'].values
 
+# ==============================================
+# Fitter
+# ==============================================
 
-extrapolation_params = { # Second to last extrapolation segment
-    'a': extrapolation_segments.iloc[-2].a_param,
-    'x0': extrapolation_segments.iloc[-2].h0_param,
-    'n': extrapolation_segments.iloc[-2].n_param,
-    'x_start': extrapolation_segments.iloc[-2].h_min
+last_seg = current_rc.iloc[1]
+extrapolation_params = {
+    'a': last_seg.a_param,
+    'x0': last_seg.h0_param,
+    'n': last_seg.n_param,
+    'x_start': last_seg.h_min
 }
 
 # init Fitter
-fitter = RatigCurveFitter(x, y, extrapolation_params)
+datafit = data
+fitter = RatingCurveFitter(
+            datafit,
+            x_min=1.2, 
+            last_segment_params=extrapolation_params,
+            fixed_breakpoints=[3.13]
+            )
 
-# Analyze current adjustment (raw)
-existing_segments = fitter.load_existing_segments(current_rc)
-existing_result = {
-    'segments': existing_segments,
-    'n_segments': len(existing_segments),
-}
+fitter.load_rcs(rcs.loc[rcs.start_date>=previous_date])
 
-print("\nPlotting current rating curve...")
-fitter.plot_results(existing_result, str(station_id))
+# Analyze current adjustments (raw)
+plot_id = fitter.existing_curves[-1].__dict__['cid']
+fitter.plot_results(plot_id, str(station_id))
 
-# Analyze previous adjustment (consisted)
-existing_segments = fitter.load_existing_segments(previous_rc)
-existing_result = {
-    'segments': existing_segments,
-    'n_segments': len(existing_segments),
-}
+# Fit new curve
+result = fitter.fit_segments(
+    n_segments=2, 
+    # curve_crossing_weight=0
+    )
+print("\nNew adjusted rating curve...")
+fitter.plot_results('new', str(station_id))
 
-print("\nPlotting previous rating curve...")
-fitter.plot_results(existing_result, str(station_id))
+fitter.plot_curves()
 
+for segment in result['segments']:
+    print(segment.__dict__)

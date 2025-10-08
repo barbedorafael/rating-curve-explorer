@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import plotly.colors as colors
+from datetime import datetime
+import pandas as pd
 
 class Segment:
     """Represents a power function segment"""
@@ -23,7 +25,7 @@ class Segment:
 
 
 class RatingCurveFitter:
-    def __init__(self, x_data, y_data, 
+    def __init__(self, data, 
                  existing_curves=None, 
                  x_min=None, x_max=None,
                  last_segment_params=None,
@@ -37,8 +39,12 @@ class RatingCurveFitter:
 
         Parameters
         ----------
-        x_data, y_data : array-like
-            Measurement data points (water level and discharge)
+        data : pd.DataFrame()
+            Table with measurement data points
+            Column formats:
+                datetime: datetime, YYYY-MM-DD HH:mm
+                water level: float, m
+                discharge: float, m3/s
         existing_curves : list of Segment objects, optional
             Pre-existing curve segments to include
         x_min, x_max : float, optional
@@ -48,8 +54,10 @@ class RatingCurveFitter:
         -----
         Combines data management and optimization in a single class for simplicity.
         """
-        self.x_data = np.array(x_data)
-        self.y_data = np.array(y_data)
+        
+        self.dates = np.array(data.datetime.dt.to_pydatetime())
+        self.x_data = np.array(data.level)
+        self.y_data = np.array(data.discharge)
         self.x_min = x_min if x_min is not None else self.x_data.min()
         self.x_max = x_max if x_max is not None else self.x_data.max()
         
@@ -61,6 +69,7 @@ class RatingCurveFitter:
         idx = np.argsort(self.x_data)
         self.x_data = self.x_data[idx]
         self.y_data = self.y_data[idx]
+        self.dates = self.dates[idx]
 
     def load_rcs(self, df):
         """
@@ -94,7 +103,7 @@ class RatingCurveFitter:
                 cid=f"{row['start_date']}_{row['end_date']}"
             )
             self.existing_curves.append(segment)
-        
+
     def create_objective_function(self,
                                   loss_weight=10,
                                   continuity_threshold=0.01,
@@ -542,12 +551,37 @@ class RatingCurveFitter:
             'n_segments': n_segments
         }
 
+    def _parse_curve_dates(self, cid):
+        """
+        Parse curve ID to extract start and end dates.
+
+        Parameters
+        ----------
+        cid : str
+            Curve ID in format 'YYYY-MM-DD_YYYY-MM-DD'
+
+        Returns
+        -------
+        tuple of datetime
+            (start_date, end_date) or (None, None) if parsing fails
+        """
+        try:
+            if '_' in cid:
+                start_str, end_str = cid.split('_')
+                start_date = datetime.strptime(start_str, '%Y-%m-%d')
+                end_date = datetime.strptime(end_str, '%Y-%m-%d')
+                return start_date, end_date
+        except (ValueError, TypeError):
+            pass
+        return None, None
+    
     def plot_curves(self, station="", show_residuals=True, width=1000, height=700):
         """
         Create interactive multi-curve visualization using Plotly.
 
         Groups segments by curve ID and creates an interactive plot showing all curves
-        with their residuals. Features include zoom, pan, and curve toggle functionality.
+        with their residuals. Residuals are computed for each curve according to the
+        date of validity and are color-coded by the curve they belong to.
 
         Parameters
         ----------
@@ -569,7 +603,8 @@ class RatingCurveFitter:
         -----
         - Curves are automatically grouped by their curve ID (cid)
         - Each curve gets a unique color and legend entry
-        - Residuals are calculated and displayed for each curve
+        - Residuals are calculated only for measurements within curve validity periods
+        - Residuals are color-coded to match their corresponding curve
         - Reference lines show ±10% and ±20% error bounds
         """
 
@@ -603,8 +638,13 @@ class RatingCurveFitter:
         # Generate smooth plotting domain
         x_plot = np.linspace(self.x_min, self.x_max, 1000)
 
-        # Plot measurement data once (shared across all curves)
+        # Plot measurement data with date information in hover
         if self.x_data is not None and self.y_data is not None:
+            # Convert dates to strings for hover display
+            date_strings = []
+            for d in self.dates:
+                date_strings.append(d.strftime('%Y-%m-%d'))
+
             scatter_trace = go.Scatter(
                 x=self.x_data,
                 y=self.y_data,
@@ -615,6 +655,8 @@ class RatingCurveFitter:
                     size=6,
                     opacity=0.7
                 ),
+                customdata=date_strings,
+                hovertemplate='<b>Measurement</b><br>Date: %{customdata}<br>H: %{x:.2f} m<br>Q: %{y:.2f} m³/s<extra></extra>',
                 showlegend=True
             )
 
@@ -649,15 +691,15 @@ class RatingCurveFitter:
                             x=x_seg,
                             y=y_seg,
                             mode='lines',
-                            name=segment_name,
+                            name=curve_id,
                             line=dict(
                                 color=curve_color,
                                 width=3,
                                 dash='solid' if seg_idx == 0 else 'dash'
                             ),
-                            hovertemplate=f'<b>{curve_id}</b><br>H: %{{x:.2f}}<br>Q: %{{y:.2f}}<extra></extra>',
+                            hovertemplate=f'<b>{curve_id}</b><br>H: %{{x:.2f}} m<br>Q: %{{y:.2f}} m³/s<extra></extra>',
                             legendgroup=curve_id,
-                            showlegend=(seg_idx == 0)  # Only show legend for first segment
+                            showlegend=(seg_idx == 0)
                         )
 
                         if main_row:
@@ -665,35 +707,88 @@ class RatingCurveFitter:
                         else:
                             fig.add_trace(segment_trace)
 
-            # Calculate and plot residuals if data available
+            # Calculate and plot residuals for valid measurements only
             if (show_residuals and main_row and
-                self.x_data is not None and self.y_data is not None):
+                self.x_data is not None and self.y_data is not None and self.dates is not None):
 
-                # Calculate fitted values for this curve
-                y_fitted = np.zeros_like(self.y_data)
-                for i, x in enumerate(self.x_data):
-                    for seg in segments:
-                        if seg.x_start <= x <= seg.x_end:
-                            y_fitted[i] = seg.evaluate(x)
-                            break
+                # Parse curve validity dates
+                start_date, end_date = self._parse_curve_dates(curve_id)
 
-                residuals = 100 * (y_fitted - self.y_data) / self.y_data
+                if start_date is not None and end_date is not None:
+                    
+                    # Find measurements within curve validity period
+                    valid_mask = np.array([
+                        d is not None and start_date <= d <= end_date
+                        for d in self.dates
+                    ])
 
-                residual_trace = go.Scatter(
-                    x=self.x_data,
-                    y=residuals,
-                    mode='markers',
-                    name=f'{curve_id} - Residuals',
-                    marker=dict(
-                        color=curve_color,
-                        size=5,
-                        opacity=0.7
-                    ),
-                    legendgroup=curve_id,
-                    showlegend=False
-                )
+                    if np.any(valid_mask):
+                        # Get valid data points
+                        x_valid = self.x_data[valid_mask]
+                        y_valid = self.y_data[valid_mask]
+                        dates_valid = self.dates[valid_mask]
 
-                fig.add_trace(residual_trace, row=residual_row, col=1)
+                        # Calculate fitted values for valid points
+                        y_fitted_valid = np.zeros_like(y_valid)
+                        for i, x in enumerate(x_valid):
+                            for seg in segments:
+                                if seg.x_start <= x <= seg.x_end:
+                                    y_fitted_valid[i] = seg.evaluate(x)
+                                    break
+
+                        # Calculate residuals
+                        residuals_valid = 100 * (y_fitted_valid - y_valid) / y_valid
+
+                        # Prepare hover data
+                        date_strings_valid = [d.strftime('%Y-%m-%d') if hasattr(d, 'strftime') else str(d) for d in dates_valid]
+
+                        residual_trace = go.Scatter(
+                            x=x_valid,
+                            y=residuals_valid,
+                            mode='markers',
+                            name=f'{curve_id} - Residuals',
+                            marker=dict(
+                                color=curve_color,
+                                size=5,
+                                opacity=0.7
+                            ),
+                            customdata=date_strings_valid,
+                            hovertemplate=f'<b>{curve_id} Residuals</b><br>Date: %{{customdata}}<br>H: %{{x:.2f}} m<br>Residual: %{{y:.1f}}%<extra></extra>',
+                            legendgroup=curve_id,
+                            showlegend=False
+                        )
+
+                        fig.add_trace(residual_trace, row=residual_row, col=1)
+
+                else:
+                    # Fallback for curves without valid date format - use all data
+                    y_fitted = np.zeros_like(self.y_data)
+                    for i, x in enumerate(self.x_data):
+                        for seg in segments:
+                            if seg.x_start <= x <= seg.x_end:
+                                y_fitted[i] = seg.evaluate(x)
+                                break
+
+                    residuals = 100 * (y_fitted - self.y_data) / self.y_data
+                    date_strings = [d.strftime('%Y-%m-%d') if hasattr(d, 'strftime') else str(d) for d in self.dates]
+
+                    residual_trace = go.Scatter(
+                        x=self.x_data,
+                        y=residuals,
+                        mode='markers',
+                        name=f'{curve_id} - Residuals',
+                        marker=dict(
+                            color=curve_color,
+                            size=5,
+                            opacity=0.7
+                        ),
+                        customdata=date_strings,
+                        hovertemplate=f'<b>{curve_id} Residuals</b><br>Date: %{{customdata}}<br>H: %{{x:.2f}} m<br>Residual: %{{y:.1f}}%<extra></extra>',
+                        legendgroup=curve_id,
+                        showlegend=False
+                    )
+
+                    fig.add_trace(residual_trace, row=residual_row, col=1)
 
         # Add reference lines for residuals
         if show_residuals and main_row:
@@ -835,7 +930,6 @@ class RatingCurveFitter:
             # Calculate comprehensive metrics
             mpe = np.mean(np.abs(residuals))  # Mean Percentage Error
             bias = np.mean(residuals)  # Bias (mean residual)
-            rmse = np.sqrt(np.mean(residuals**2))  # Root Mean Square Error
             positive_errors = np.sum(residuals > 0) / len(residuals) * 100  # % positive errors
             negative_errors = np.sum(residuals < 0) / len(residuals) * 100  # % negative errors
 
@@ -855,8 +949,9 @@ class RatingCurveFitter:
             # Enhanced metrics text box
             metrics_text = (f'MPE: {mpe:.1f}%\n'
                           f'Bias: {bias:.1f}%\n'
-                          f'RMSE: {rmse:.1f}%\n'
                           f'Max Error: {max_error:.1f}%\n'
+                          f'% Positives: {positive_errors:.1f}%\n'
+                          f'% Negatives: {negative_errors:.1f}%'
                           f'Within ±10%: {within_10pct:.1f}%\n'
                           f'Within ±20%: {within_20pct:.1f}%')
 
