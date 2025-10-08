@@ -678,7 +678,10 @@ class RatingCurveFitter:
                 self.x_data is not None and self.y_data is not None and self.dates is not None):
 
                 # Parse curve validity dates
-                start_date, end_date = curve_id.split('_')
+                try:
+                    start_date, end_date = curve_id.split('_')
+                except:
+                    start_date, end_date = (None, None)
 
                 if start_date is not None and end_date is not None:
                     

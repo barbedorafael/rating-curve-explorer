@@ -64,7 +64,7 @@ extrapolation_params = {
 datefit = '2002-04-23'
 fitter = RatingCurveFitter(
             data[data.date >= datefit],
-            x_min=0.2, 
+            x_min=0.7, 
             # last_segment_params=extrapolation_params,
             # fixed_breakpoints=[3.13],
             )
@@ -72,19 +72,19 @@ fitter = RatingCurveFitter(
 fitter.load_rcs(rcs.loc[rcs.start_date>=datefit])
 
 # Analyze current adjustments (raw)
-idd = -1
+idd = 3
 plot_id = f"{sdates[idd]}_{edates[idd]}"
 fitter.plot_results(plot_id, str(station_id))
 
 # Fit new curve
-result = fitter.fit_segments(
-    n_segments=2, 
-    # curve_crossing_weight=0
-    )
-print("\nNew adjusted rating curve...")
-fitter.plot_results('new', str(station_id))
-for segment in result['segments']:
-    print(segment.__dict__)
+# result = fitter.fit_segments(
+#     n_segments=2, 
+#     curve_crossing_weight=0
+#     )
+# print("\nNew adjusted rating curve...")
+# fitter.plot_results('new', str(station_id))
+# for segment in result['segments']:
+#     print(segment.__dict__)
 
 
 fitter.plot_curves()
