@@ -22,7 +22,6 @@ class Segment:
         """Evaluate the power function at given x values"""
         return self.a * np.maximum(x - self.x0, 0) ** self.n
 
-
 class RatingCurveFitter:
     def __init__(self, data, 
                  existing_curves=None, 
@@ -180,7 +179,7 @@ class RatingCurveFitter:
                 val1 = segments[i].evaluate(x_break)
                 val2 = segments[i+1].evaluate(x_break)
                 rel_diff = abs(val1 - val2) / (abs(val1) + 1e-10)
-                if rel_diff > continuity_threshold:  # 5% threshold
+                if rel_diff > continuity_threshold:
                     continuity_penalty += (rel_diff - continuity_threshold)**2
             
             # Minimum segment range penalty
@@ -251,7 +250,7 @@ class RatingCurveFitter:
 
             # Curve crossing penalty - prevent new curve from crossing existing curves
             curve_crossing_penalty = 0
-            if self.existing_curves:
+            if self.existing_curves or curve_crossing_weight>0:
                 # Crossing detection: check transition points
                 x_check = np.linspace(self.x_min, self.x_max, 100)
 
@@ -800,15 +799,20 @@ class RatingCurveFitter:
 
         # Update axes
         if main_row:
-            fig.update_xaxes(title_text="Water Level (m)", row=main_row, col=1)
-            fig.update_yaxes(title_text="Discharge (m³/s)", type="log", row=main_row, col=1)
+            fig.update_xaxes(title_text="Water Level (m)", 
+                             row=main_row, 
+                             col=1)
+            fig.update_yaxes(title_text="Discharge (m³/s)", 
+                            #  type="log", 
+                             row=main_row, 
+                             col=1)
 
             if show_residuals:
                 fig.update_xaxes(title_text="Water Level (m)", row=residual_row, col=1)
                 fig.update_yaxes(title_text="Residual (%)", row=residual_row, col=1)
         else:
             fig.update_xaxes(title_text="Water Level (m)")
-            fig.update_yaxes(title_text="Discharge (m³/s)", type="log")
+            fig.update_yaxes(title_text="Discharge (m³/s)")
 
         return fig
 
@@ -878,8 +882,8 @@ class RatingCurveFitter:
         ax1.grid(True, alpha=0.3)
         ax1.legend(loc='upper left', fontsize=9)
 
-        # Log scale for better visualization
-        ax1.set_yscale('log')
+        # # Log scale for better visualization
+        # ax1.set_yscale('log')
 
         if show_components and ax2 is not None:
             # Calculate residuals for this specific curve

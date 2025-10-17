@@ -71,14 +71,14 @@ class HydroDB:
             - start_date, end_date: validity period
             - segment_number: segment identifier (XX/YY format)
             - h_min, h_max: height range in cm
-            - h0_param, a_param, n_param: curve parameters for Q = a*(H-h0)^n
+            - a_param, h0_param, n_param: curve parameters for Q = a*(H-h0)^n
             - date_inserted: when the record was added
         """
         conn = sqlite3.connect(self.db_path)
 
         query = """
         SELECT start_date, end_date, segment_number, h_min, h_max,
-               h0_param, a_param, n_param, date_inserted
+               a_param, h0_param, n_param, date_inserted
         FROM rating_curve
         WHERE station_id = ?
         ORDER BY start_date, segment_number
