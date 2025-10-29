@@ -250,7 +250,7 @@ class RatingCurveFitter:
 
             # Curve crossing penalty - prevent new curve from crossing existing curves
             curve_crossing_penalty = 0
-            if self.existing_curves or curve_crossing_weight>0:
+            if self.existing_curves and curve_crossing_weight>0:
                 # Crossing detection: check transition points
                 x_check = np.linspace(self.x_min, self.x_max, 100)
 
@@ -816,7 +816,7 @@ class RatingCurveFitter:
 
         return fig
 
-    def plot_results(self, cid, station="", show_components=True, figsize=(12, 8)):
+    def plot_results(self, cid, station="", show_components=True, figsize=(12, 16)):
         """
         Visualize a single rating curve with comprehensive data analysis.
 
@@ -828,7 +828,7 @@ class RatingCurveFitter:
             Station identifier for title
         show_components : bool, default True
             Whether to show residual plot as subplot
-        figsize : tuple, default (12, 8)
+        figsize : tuple, default (12, 16)
             Figure size (width, height) in inches
         """
         # Get segments for the specified curve ID
@@ -842,14 +842,31 @@ class RatingCurveFitter:
 
         # Create subplots
         if show_components:
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=figsize, height_ratios=[3, 1])
+            fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=figsize, height_ratios=[2, 1, 1])
         else:
             fig, ax1 = plt.subplots(figsize=figsize)
             ax2 = None
 
-        # Plot observed data
-        ax1.scatter(self.x_data, self.y_data, alpha=0.6, color='black', s=30,
-                   label='Observed', zorder=3)
+        # Identify which segment each data point belongs to for the main plot
+        segment_assignments_main = np.zeros_like(self.x_data, dtype=int)
+        for i, x in enumerate(self.x_data):
+            for seg_idx, seg in enumerate(segments):
+                if seg.x_start <= x <= seg.x_end:
+                    segment_assignments_main[i] = seg_idx
+                    break
+
+        # Define markers and colors for different segments
+        markers = ['o', 's', '^', 'D', 'v', '<', '>', 'p', '*', 'h']
+        segment_colors = plt.cm.Set1(np.linspace(0, 1, len(segments)))
+
+        # Plot observed data with different markers for each segment
+        for seg_idx in range(len(segments)):
+            mask = segment_assignments_main == seg_idx
+            if np.any(mask):
+                ax1.scatter(self.x_data[mask], self.y_data[mask],
+                           alpha=0.7, color=segment_colors[seg_idx], s=30,
+                           marker=markers[seg_idx % len(markers)],
+                           label=f'Segment {seg_idx+1} Data', zorder=3)
 
         # Generate smooth curve for plotting fitted segments
         x_plot = np.linspace(self.x_min, self.x_max, 500)
@@ -885,13 +902,16 @@ class RatingCurveFitter:
         # # Log scale for better visualization
         # ax1.set_yscale('log')
 
-        if show_components and ax2 is not None:
+        if show_components:
             # Calculate residuals for this specific curve
             y_fitted = np.zeros_like(self.y_data)
+            segment_assignments = np.zeros_like(self.x_data, dtype=int)  # Track which segment each point belongs to
+
             for i, x in enumerate(self.x_data):
-                for seg in segments:
+                for seg_idx, seg in enumerate(segments):
                     if seg.x_start <= x <= seg.x_end:
                         y_fitted[i] = seg.evaluate(x)
+                        segment_assignments[i] = seg_idx
                         break
 
             residuals = 100 * (y_fitted - self.y_data) / self.y_data
@@ -907,28 +927,38 @@ class RatingCurveFitter:
             within_20pct = np.sum(np.abs(residuals) <= 20) / len(residuals) * 100
             max_error = np.max(np.abs(residuals))
 
-            # Plot residuals
-            ax2.scatter(self.x_data, residuals, alpha=0.6, color='blue', s=20)
-            ax2.axhline(y=0, color='black', linestyle='-', alpha=0.7)
-            ax2.axhline(y=10, color='red', linestyle='--', alpha=0.5, label='±10%')
-            ax2.axhline(y=-10, color='red', linestyle='--', alpha=0.5)
-            ax2.axhline(y=20, color='orange', linestyle='--', alpha=0.5, label='±20%')
-            ax2.axhline(y=-20, color='orange', linestyle='--', alpha=0.5)
-
             # Enhanced metrics text box
             metrics_text = (f'MAPE: {mape:.1f}%\n'
-                          f'Bias: {bias:.1f}%\n'
-                          f'Max Error: {max_error:.1f}%\n'
-                          f'% Positives: {positive_errors:.1f}%\n'
-                          f'% Negatives: {negative_errors:.1f}%\n'
-                          f'Within ±10%: {within_10pct:.1f}%\n'
-                          f'Within ±20%: {within_20pct:.1f}%')
+                            f'Bias: {bias:.1f}%\n'
+                            f'Max Error: {max_error:.1f}%\n'
+                            f'% Positives: {positive_errors:.1f}%\n'
+                            f'% Negatives: {negative_errors:.1f}%\n'
+                            f'Within ±10%: {within_10pct:.1f}%\n'
+                            f'Within ±20%: {within_20pct:.1f}%')
 
             ax1.text(0.98, 0.02, metrics_text,
                     transform=ax1.transAxes, fontsize=9,
                     va='bottom', ha='right',
                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
 
+            # Define markers for different segments
+            markers = ['o', 's', '^', 'D', 'v', '<', '>', 'p', '*', 'h']
+            segment_colors = plt.cm.Set1(np.linspace(0, 1, len(segments)))
+
+            # Plot residuals over x_data with different markers for each segment
+            for seg_idx in range(len(segments)):
+                mask = segment_assignments == seg_idx
+                if np.any(mask):
+                    ax2.scatter(self.x_data[mask], residuals[mask],
+                              alpha=0.7, color=segment_colors[seg_idx],
+                              marker=markers[seg_idx % len(markers)], s=20,
+                              label=f'Segment {seg_idx+1}')
+
+            ax2.axhline(y=0, color='black', linestyle='-', alpha=0.7)
+            ax2.axhline(y=10, color='red', linestyle='--', alpha=0.5, label='±10%')
+            ax2.axhline(y=-10, color='red', linestyle='--', alpha=0.5)
+            ax2.axhline(y=20, color='orange', linestyle='--', alpha=0.5, label='±20%')
+            ax2.axhline(y=-20, color='orange', linestyle='--', alpha=0.5)
             ax2.set_xlabel('Water Level (m)')
             ax2.set_ylabel('Residual (%)')
             ax2.set_title('Residuals (Fitted - Observed)/Observed × 100%')
@@ -939,6 +969,34 @@ class RatingCurveFitter:
             residual_max = np.max(np.abs(residuals))
             ax2.set_ylim(-min(50, residual_max * 1.2), min(50, residual_max * 1.2))
 
+            # Convert dates to datetime for proper chronological sorting
+            dates_dt = pd.to_datetime(self.dates)
+
+            # Plot residuals over time with different markers for each segment
+            for seg_idx in range(len(segments)):
+                mask = segment_assignments == seg_idx
+                if np.any(mask):
+                    ax3.scatter(dates_dt[mask], residuals[mask],
+                              alpha=0.7, color=segment_colors[seg_idx],
+                              marker=markers[seg_idx % len(markers)], s=20,
+                              label=f'Segment {seg_idx+1}')
+
+            ax3.axhline(y=0, color='black', linestyle='-', alpha=0.7)
+            ax3.axhline(y=10, color='red', linestyle='--', alpha=0.5, label='±10%')
+            ax3.axhline(y=-10, color='red', linestyle='--', alpha=0.5)
+            ax3.axhline(y=20, color='orange', linestyle='--', alpha=0.5, label='±20%')
+            ax3.axhline(y=-20, color='orange', linestyle='--', alpha=0.5)
+            ax3.set_xlabel('Date')
+            ax3.set_ylabel('Residual (%)')
+            ax3.grid(True, alpha=0.3)
+            ax3.legend(loc='upper right')
+            ax3.tick_params(axis='x', labelrotation=45)
+
+            # Set reasonable y-limits for residuals
+            residual_max = np.max(np.abs(residuals))
+            ax2.set_ylim(-min(100, residual_max * 1.2), min(100, residual_max * 1.2))
+            ax3.set_ylim(-min(100, residual_max * 1.2), min(100, residual_max * 1.2))
+        
         plt.tight_layout()
         plt.show()
 

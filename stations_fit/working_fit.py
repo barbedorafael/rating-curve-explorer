@@ -16,7 +16,7 @@ def summarize_segments(df):
 
 
 db_path = "data/hydrodata.sqlite"
-station_id = 76310000
+station_id = 76750000
 station = HydroDB(db_path, station_id)
 
 rcs = station.load_rating_curve_data()
@@ -24,8 +24,6 @@ sdates = rcs['start_date'].unique()
 edates = rcs['end_date'].unique()
 current_date = sdates[-1]
 current_rc = rcs[rcs['start_date'] == current_date]
-previous_date = sdates[-2]
-previous_rc = rcs[rcs['start_date'] == previous_date]
 extrapolation_segments = rcs[rcs['segment_number'].str.split('/').str[0] == rcs['segment_number'].str.split('/').str[1]]
 
 print(f"Rating Curve Adjuster for station {station_id}")
@@ -47,12 +45,18 @@ print(f"Loaded {len(data['level'])} measurements")
 print(f"Level range: {data['level'].min():.2f} - {data['level'].max():.2f} m")
 print(f"Discharge range: {data['discharge'].min():.2f} - {data['discharge'].max():.2f} m³/s")
 
+# Load time-series data
+print("Loading level time-series data...")
+levels = station.load_timeseries_data()
+levels_min = levels['value'].min()
+levels_max = levels['value'].max()
+print(f"Level range: {levels_min:.2f} - {levels_max:.2f} m")
 
 # ==============================================
 # Fitter
 # ==============================================
-
-last_seg = current_rc.iloc[-1]
+ext_curve = current_rc
+last_seg = ext_curve.iloc[1]
 extrapolation_params = {
     'a': last_seg.a_param,
     'x0': last_seg.h0_param,
@@ -61,15 +65,17 @@ extrapolation_params = {
 }
 
 # init Fitter
-datefit = '2015-06-17'
+datefit = '2022-01-01'
+h_min = data.level.min() - abs(data.level.min())*0.2
 fitter = RatingCurveFitter(
             data[data.date >= datefit],
-            x_min=data.level.min(), 
+            x_min=levels_min-abs(levels_min*0.25), 
+            x_max=levels_max+abs(levels_max*0.25),
             last_segment_params=extrapolation_params,
-            # fixed_breakpoints=[3.13],
+            fixed_breakpoints=[1.6],
             )
 
-fitter.load_rcs(rcs.loc[rcs.start_date>='2015-06-18'])
+fitter.load_rcs(rcs.loc[rcs.start_date>='1999-06-18'])
 
 # Analyze current adjustments (raw)
 idd = -2
@@ -86,4 +92,4 @@ fitter.plot_results(plot_id, str(station_id))
 # for segment in result['segments']:
 #     print(segment.__dict__)
 
-fitter.plot_curves()
+# fitter.plot_curves()
