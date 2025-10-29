@@ -429,16 +429,10 @@ class RatingCurveFitter:
         n_param_segments = n_segments - 1 if self.last_segment_params else n_segments
 
         for i in range(n_param_segments):
-            # Use last segment parameters as base, adjust x0 for each segment
-            if self.last_segment_params:
-                a_init = self.last_segment_params['a']
-                x0_init = self.last_segment_params['x0']
-                n_init = self.last_segment_params['n']
-            else:
-                # Fallback to simple initial guesses
-                a_init = np.mean(self.y_data) * 3
-                x0_init = np.min(self.x_data)
-                n_init = 1.7
+            # Fallback to simple initial guesses
+            a_init = 25
+            x0_init = np.min(self.x_data)
+            n_init = 1.7
 
             params.extend([a_init, x0_init, n_init])
 
@@ -473,11 +467,11 @@ class RatingCurveFitter:
         # Bounds for segment parameters
         n_param_segments = n_segments - 1 if self.last_segment_params else n_segments
 
-        for _ in range(n_param_segments):
+        for i in range(n_param_segments):
             # a: coefficient
             bounds.append((1, 1e4))
             # x0: offset in m
-            bounds.append((self.x_min - abs(self.x_min*1.5), self.x_min + abs(self.x_min*1.5)))
+            bounds.append((-100,100))
             # n: power
             bounds.append((1.2, 5))
 

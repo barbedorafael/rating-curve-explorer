@@ -16,7 +16,7 @@ def summarize_segments(df):
 
 
 db_path = "data/hydrodata.sqlite"
-station_id = 76750000
+station_id = 77500000
 station = HydroDB(db_path, station_id)
 
 rcs = station.load_rating_curve_data()
@@ -55,7 +55,7 @@ print(f"Level range: {levels_min:.2f} - {levels_max:.2f} m")
 # ==============================================
 # Fitter
 # ==============================================
-ext_curve = rcs[rcs.start_date=='2000-01-01']
+ext_curve = current_rc # rcs[rcs.start_date=='2000-01-01']
 last_seg = ext_curve.iloc[-1]
 extrapolation_params = {
     'a': last_seg.a_param,
@@ -65,20 +65,20 @@ extrapolation_params = {
 }
 
 # init Fitter
-datefit = '2015-10-20'
+datefit = '2012-09-20'
 h_min = data.level.min() - abs(data.level.min())*0.2
 fitter = RatingCurveFitter(
             data[data.date >= datefit],
             x_min=levels_min-abs(levels_min*0.25), 
             x_max=levels_max+abs(levels_max*0.25),
             last_segment_params=extrapolation_params,
-            # fixed_breakpoints=[1.6],
+            fixed_breakpoints=[12],
             )
 
 fitter.load_rcs(rcs.loc[rcs.start_date>='1999-06-18'])
 
 # Analyze current adjustments (raw)
-idd = -1
+idd = -2
 plot_id = f"{sdates[idd]}_{edates[idd]}"
 fitter.plot_results(plot_id, str(station_id))
 
