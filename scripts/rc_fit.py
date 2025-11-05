@@ -105,7 +105,7 @@ class RatingCurveFitter:
     def create_objective_function(self,
                                   loss_weight=10,
                                   continuity_threshold=0.01,
-                                  continuity_weight=100,
+                                  continuity_weight=1000,
                                   min_segment_range=0.1,
                                   min_range_weight=1,
                                   min_points_per_segment=2,
