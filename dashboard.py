@@ -154,8 +154,10 @@ class BaseStationAnalyzer:
             # Handle NULL end_date
             df['end_date'] = df['end_date'].fillna(pd.Timestamp('2099-12-31'))
 
-            # Create formatted curve ID: "start_date: segment_number"
-            df['curve_id'] = df['start_date'].dt.strftime('%Y-%m-%d') + ': ' + df['segment_number']
+            # Create curve ID based on date range only (for grouping segments into curves)
+            df['curve_id'] = df['start_date'].dt.strftime('%Y-%m-%d') + '_' + df['end_date'].dt.strftime('%Y-%m-%d')
+            # Keep segment ID for individual segment identification
+            df['segment_id'] = df['start_date'].dt.strftime('%Y-%m-%d') + ': ' + df['segment_number']
 
         return df
 
@@ -163,14 +165,15 @@ class BaseStationAnalyzer:
         """Setup consistent color mapping for rating curves."""
         if not self.rating_curves.empty:
             # Use Plotly color palette for consistent colors
-            n_curves = len(self.rating_curves)
+            # Group by curve_id (date range) to assign colors to curves, not individual segments
+            unique_curves = self.rating_curves['curve_id'].unique()
             plotly_colors = px.colors.qualitative.Plotly
 
             # Clear existing colors for new station
             self._curve_colors = {}
 
-            for i, (_, curve) in enumerate(self.rating_curves.iterrows()):
-                self._curve_colors[curve['curve_id']] = plotly_colors[i % len(plotly_colors)]
+            for i, curve_id in enumerate(unique_curves):
+                self._curve_colors[curve_id] = plotly_colors[i % len(plotly_colors)]
 
     def get_data_by_rating_curve(self, selected_curves: Optional[List[str]] = None) -> Dict[str, pd.DataFrame]:
         """
@@ -182,30 +185,44 @@ class BaseStationAnalyzer:
 
         curve_data = {}
 
-        for _, curve in self.rating_curves.iterrows():
-            curve_id = curve['curve_id']  # Use new formatted curve_id
-
+        # Group segments by curve_id (date range)
+        for curve_id in self.rating_curves['curve_id'].unique():
             # Skip if not in selected curves
             if selected_curves and curve_id not in selected_curves:
                 continue
 
-            # Filter by date range
+            # Get all segments for this curve
+            curve_segments = self.rating_curves[self.rating_curves['curve_id'] == curve_id]
+
+            # Get the overall date range for this curve
+            start_date = curve_segments['start_date'].min()
+            end_date = curve_segments['end_date'].max()
+
+            # Filter by overall date range first
             date_mask = (
-                (self.measured_data['date'] >= curve['start_date']) &
-                (self.measured_data['date'] <= curve['end_date'])
+                (self.measured_data['date'] >= start_date) &
+                (self.measured_data['date'] <= end_date)
             )
 
-            # Filter by level range
-            level_mask = (
-                (self.measured_data['level'] >= curve['h_min']) &
-                (self.measured_data['level'] <= curve['h_max'])
-            )
+            # For each measurement in the date range, check if it falls within any segment's level range
+            date_filtered_data = self.measured_data[date_mask].copy()
+            if date_filtered_data.empty:
+                continue
 
-            # Combined filter
-            combined_mask = date_mask & level_mask
-            filtered_data = self.measured_data[combined_mask].copy()
+            valid_measurements = []
+            segment_info = []
 
-            if not filtered_data.empty:
+            for _, measurement in date_filtered_data.iterrows():
+                # Check which segment this measurement belongs to
+                for _, segment in curve_segments.iterrows():
+                    if (segment['h_min'] <= measurement['level'] <= segment['h_max']):
+                        valid_measurements.append(measurement)
+                        segment_info.append(segment['segment_number'])
+                        break
+
+            if valid_measurements:
+                filtered_data = pd.DataFrame(valid_measurements)
+                filtered_data['segment_number'] = segment_info
                 curve_data[curve_id] = filtered_data
 
         return curve_data
@@ -519,8 +536,18 @@ class ScatterAnalyzer(BaseStationAnalyzer):
 
         config = self.PLOT_CONFIGS[plot_type]
 
-        # Create figure
-        fig = go.Figure()
+        # Create figure - use subplots for discharge vs level to include residuals
+        if plot_type == 'discharge_vs_level':
+            from plotly.subplots import make_subplots
+            fig = make_subplots(
+                rows=3, cols=1,
+                row_heights=[0.7, 0.15, 0.15],
+                subplot_titles=[config['title'], 'Residuals vs Level', 'Residuals vs Time'],
+                vertical_spacing=0.12,
+                shared_xaxes=False
+            )
+        else:
+            fig = go.Figure()
 
         # Get data filtered by rating curves
         curve_data = self.get_data_by_rating_curve(selected_curves)
@@ -544,7 +571,11 @@ class ScatterAnalyzer(BaseStationAnalyzer):
             )
             return fig
 
-        # Plot each rating curve with different color
+        # Define markers for different segments within curves
+        segment_markers = ['circle', 'square', 'diamond', 'triangle-up', 'triangle-down',
+                          'triangle-left', 'triangle-right', 'pentagon', 'hexagon', 'star']
+
+        # For each curve, plot measurements with different markers for segments
         for curve_id, data in curve_data.items():
             if data.empty:
                 continue
@@ -564,37 +595,354 @@ class ScatterAnalyzer(BaseStationAnalyzer):
             # Get color for this curve
             color = self._curve_colors.get(curve_id, 'gray')
 
-            # Create scatter plot with hover information
-            fig.add_trace(go.Scatter(
-                x=plot_data[x_col],
-                y=plot_data[y_col],
-                mode='markers',
-                name=f'Curve {curve_id}',
-                marker=dict(color=color, size=8, opacity=0.7),
-                hovertemplate='<b>Curve:</b> %{fullData.name}<br>' +
-                            f'<b>{config["xlabel"]}:</b> %{{x:.2f}}<br>' +
-                            f'<b>{config["ylabel"]}:</b> %{{y:.1f}}<br>' +
-                            '<b>Date:</b> %{customdata}<extra></extra>',
-                customdata=plot_data['date'].dt.strftime('%Y-%m-%d')
-            ))
+            # Group by segment within curve and use different markers
+            if 'segment_number' in plot_data.columns:
+                # Sort segment numbers for consistent legend ordering
+                sorted_segments = sorted(plot_data['segment_number'].unique())
+
+                for segment_num in sorted_segments:
+                    segment_data = plot_data[plot_data['segment_number'] == segment_num]
+
+                    # Use segment number to assign markers consistently
+                    try:
+                        seg_idx = int(segment_num.split('/')[0]) - 1
+                        marker_idx = seg_idx % len(segment_markers)
+                    except:
+                        marker_idx = hash(segment_num) % len(segment_markers)
+
+                    marker = segment_markers[marker_idx]
+
+                    # Add to main plot (row 1) for subplots, or main figure for single plots
+                    if plot_type == 'discharge_vs_level':
+                        fig.add_trace(go.Scatter(
+                            x=segment_data[x_col],
+                            y=segment_data[y_col],
+                            mode='markers',
+                            name=f'{curve_id} - Seg {segment_num}',
+                            marker=dict(color=color, size=8, opacity=0.7, symbol=marker),
+                            legendgroup=curve_id,
+                            showlegend=True,
+                            hovertemplate='<b>Curve:</b> %{fullData.name}<br>' +
+                                        f'<b>{config["xlabel"]}:</b> %{{x:.2f}}<br>' +
+                                        f'<b>{config["ylabel"]}:</b> %{{y:.1f}}<br>' +
+                                        '<b>Date:</b> %{customdata}<extra></extra>',
+                            customdata=segment_data['date'].dt.strftime('%Y-%m-%d')
+                        ), row=1, col=1)
+                    else:
+                        fig.add_trace(go.Scatter(
+                            x=segment_data[x_col],
+                            y=segment_data[y_col],
+                            mode='markers',
+                            name=f'{curve_id} - Seg {segment_num}',
+                            marker=dict(color=color, size=8, opacity=0.7, symbol=marker),
+                            legendgroup=curve_id,
+                            showlegend=True,
+                            hovertemplate='<b>Curve:</b> %{fullData.name}<br>' +
+                                        f'<b>{config["xlabel"]}:</b> %{{x:.2f}}<br>' +
+                                        f'<b>{config["ylabel"]}:</b> %{{y:.1f}}<br>' +
+                                        '<b>Date:</b> %{customdata}<extra></extra>',
+                            customdata=segment_data['date'].dt.strftime('%Y-%m-%d')
+                        ))
+            else:
+                # Fallback for data without segment info
+                if plot_type == 'discharge_vs_level':
+                    fig.add_trace(go.Scatter(
+                        x=plot_data[x_col],
+                        y=plot_data[y_col],
+                        mode='markers',
+                        name=f'Curve {curve_id}',
+                        marker=dict(color=color, size=8, opacity=0.7),
+                        hovertemplate='<b>Curve:</b> %{fullData.name}<br>' +
+                                    f'<b>{config["xlabel"]}:</b> %{{x:.2f}}<br>' +
+                                    f'<b>{config["ylabel"]}:</b> %{{y:.1f}}<br>' +
+                                    '<b>Date:</b> %{customdata}<extra></extra>',
+                        customdata=plot_data['date'].dt.strftime('%Y-%m-%d')
+                    ), row=1, col=1)
+                else:
+                    fig.add_trace(go.Scatter(
+                        x=plot_data[x_col],
+                        y=plot_data[y_col],
+                        mode='markers',
+                        name=f'Curve {curve_id}',
+                        marker=dict(color=color, size=8, opacity=0.7),
+                        hovertemplate='<b>Curve:</b> %{fullData.name}<br>' +
+                                    f'<b>{config["xlabel"]}:</b> %{{x:.2f}}<br>' +
+                                    f'<b>{config["ylabel"]}:</b> %{{y:.1f}}<br>' +
+                                    '<b>Date:</b> %{customdata}<extra></extra>',
+                        customdata=plot_data['date'].dt.strftime('%Y-%m-%d')
+                    ))
+
+        # Add rating curve lines only for discharge vs level plot
+        if plot_type == 'discharge_vs_level':
+            line_styles = ['solid', 'dash', 'dot', 'dashdot', 'longdash', 'longdashdot']
+
+            for curve_id in curve_data.keys():
+                # Get color for this curve
+                color = self._curve_colors.get(curve_id, 'gray')
+
+                # Get all segments for this curve
+                curve_segments = self.rating_curves[self.rating_curves['curve_id'] == curve_id]
+                curve_segments = curve_segments.sort_values('segment_number')
+
+                # Plot rating curve lines for each segment
+                for seg_idx, (_, segment) in enumerate(curve_segments.iterrows()):
+                    # Create level range for this segment (convert from cm to m and back)
+                    h_min_m = segment['h_min'] / 100  # Convert cm to m
+                    h_max_m = segment['h_max'] / 100  # Convert cm to m
+
+                    # Generate smooth level values in meters
+                    h_range_m = np.linspace(h_min_m, h_max_m, 100)
+
+                    # Calculate discharge using rating curve equation: Q = a * (H - h0)^n
+                    h_adj = np.maximum(h_range_m - segment['h0_param'], 0.001)
+                    q_range = segment['a_param'] * (h_adj ** segment['n_param'])
+
+                    # Convert levels back to cm for plotting
+                    h_range_cm = h_range_m * 100
+
+                    # Use different line styles for better distinction between segments
+                    line_dash = line_styles[seg_idx % len(line_styles)]
+                    line_width = 3 if seg_idx == 0 else 2.5
+
+                    fig.add_trace(go.Scatter(
+                        x=q_range,
+                        y=h_range_cm,
+                        mode='lines',
+                        name=f'{curve_id} - Seg {segment["segment_number"]}',
+                        line=dict(color=color, width=line_width, dash=line_dash),
+                        legendgroup=curve_id,
+                        showlegend=True,
+                        hovertemplate=f'<b>Rating Curve Line</b><br>' +
+                                    f'<b>Segment:</b> {segment["segment_number"]}<br>' +
+                                    '<b>Discharge:</b> %{x:.2f} m³/s<br>' +
+                                    '<b>Level:</b> %{y:.1f} cm<br>' +
+                                    f'<b>Equation:</b> Q = {segment["a_param"]:.3f} × (H - {segment["h0_param"]:.3f})^{segment["n_param"]:.3f}<extra></extra>'
+                    ), row=1, col=1)
+
+            # Calculate and plot residuals for discharge vs level
+            self._add_residuals_plots(fig, curve_data)
 
         # Update layout
-        fig.update_layout(
-            title=f"Station {self._station_id} - {config['title']}<br>" +
-                  "<sub>Data colored by rating curve segment</sub>",
-            xaxis_title=config['xlabel'],
-            yaxis_title=config['ylabel'],
-            hovermode='closest',
-            showlegend=len(curve_data) > 1,
-            height=int(figsize[1] * 100),
-            width=int(figsize[0] * 100)
-        )
+        subtitle = "<sub>Colors identify rating curves, markers identify segments</sub>" if plot_type == 'discharge_vs_level' else "<sub>Data grouped by rating curve</sub>"
 
-        # Add grid
-        fig.update_xaxes(showgrid=True, gridcolor='lightgray')
-        fig.update_yaxes(showgrid=True, gridcolor='lightgray')
+        if plot_type == 'discharge_vs_level':
+            # For subplots, update individual axis titles
+            fig.update_layout(
+                title=f"Station {self._station_id} - {config['title']}<br>" + subtitle,
+                hovermode='closest',
+                showlegend=len(curve_data) > 1,
+                height=1200,  # taller for 3 subplots
+                width=int(figsize[0] * 100)
+            )
+            # Update axis titles for each subplot
+            fig.update_xaxes(title_text=config['xlabel'], row=1, col=1)
+            fig.update_yaxes(title_text=config['ylabel'], row=1, col=1)
+            fig.update_xaxes(title_text="Level (cm)", row=2, col=1)
+            fig.update_yaxes(title_text="Residual (%)", row=2, col=1)
+            fig.update_xaxes(title_text="Date", row=3, col=1)
+            fig.update_yaxes(title_text="Residual (%)", row=3, col=1)
+
+            # Add grid to all subplots
+            for row in [1, 2, 3]:
+                fig.update_xaxes(showgrid=True, gridcolor='lightgray', row=row, col=1)
+                fig.update_yaxes(showgrid=True, gridcolor='lightgray', row=row, col=1)
+        else:
+            # For single plots
+            fig.update_layout(
+                title=f"Station {self._station_id} - {config['title']}<br>" + subtitle,
+                xaxis_title=config['xlabel'],
+                yaxis_title=config['ylabel'],
+                hovermode='closest',
+                showlegend=len(curve_data) > 1,
+                height=int(figsize[1] * 100),
+                width=int(figsize[0] * 100)
+            )
+            # Add grid
+            fig.update_xaxes(showgrid=True, gridcolor='lightgray')
+            fig.update_yaxes(showgrid=True, gridcolor='lightgray')
 
         return fig
+
+    def _add_residuals_plots(self, fig: go.Figure, curve_data: Dict[str, pd.DataFrame]):
+        """
+        Add residuals plots for discharge vs level (rows 2 and 3 of subplot).
+        """
+        segment_markers = ['circle', 'square', 'diamond', 'triangle-up', 'triangle-down',
+                          'triangle-left', 'triangle-right', 'pentagon', 'hexagon', 'star']
+
+        # For each curve, calculate residuals and plot them
+        for curve_id, data in curve_data.items():
+            if data.empty or 'segment_number' not in data.columns:
+                continue
+
+            # Get color for this curve
+            color = self._curve_colors.get(curve_id, 'gray')
+
+            # Get all segments for this curve
+            curve_segments = self.rating_curves[self.rating_curves['curve_id'] == curve_id]
+
+            # Calculate residuals for each measurement
+            residuals_data = []
+            for _, measurement in data.iterrows():
+                level_m = measurement['level'] / 100  # Convert cm to m
+                actual_discharge = measurement['discharge']
+                segment_num = measurement['segment_number']
+
+                # Find the corresponding segment
+                segment_row = curve_segments[curve_segments['segment_number'] == segment_num]
+                if segment_row.empty:
+                    continue
+
+                segment = segment_row.iloc[0]
+
+                # Calculate predicted discharge using rating curve equation
+                h_adj = max(level_m - segment['h0_param'], 0.001)
+                predicted_discharge = segment['a_param'] * (h_adj ** segment['n_param'])
+
+                if actual_discharge > 0:
+                    # Calculate percentage residual
+                    residual_pct = ((predicted_discharge - actual_discharge) / actual_discharge) * 100
+
+                    residuals_data.append({
+                        'level': measurement['level'],
+                        'date': measurement['date'],
+                        'residual_pct': residual_pct,
+                        'segment_number': segment_num
+                    })
+
+            if not residuals_data:
+                continue
+
+            residuals_df = pd.DataFrame(residuals_data)
+
+            # Convert dates to datetime for proper plotting
+            residuals_df['date'] = pd.to_datetime(residuals_df['date'])
+
+            # Plot residuals by segment with same markers as main plot
+            sorted_segments = sorted(residuals_df['segment_number'].unique())
+            for segment_num in sorted_segments:
+                segment_residuals = residuals_df[residuals_df['segment_number'] == segment_num]
+
+                # Use same marker assignment logic as main plot
+                try:
+                    seg_idx = int(segment_num.split('/')[0]) - 1
+                    marker_idx = seg_idx % len(segment_markers)
+                except:
+                    marker_idx = hash(segment_num) % len(segment_markers)
+
+                marker = segment_markers[marker_idx]
+
+                # Residuals vs Level (row 2)
+                fig.add_trace(go.Scatter(
+                    x=segment_residuals['level'],
+                    y=segment_residuals['residual_pct'],
+                    mode='markers',
+                    name=f'{curve_id} - Seg {segment_num}',
+                    marker=dict(color=color, size=6, opacity=0.7, symbol=marker),
+                    legendgroup=curve_id,
+                    showlegend=False,  # Don't duplicate in legend
+                    hovertemplate='<b>Residuals vs Level</b><br>' +
+                                '<b>Level:</b> %{x:.1f} cm<br>' +
+                                '<b>Residual:</b> %{y:.1f}%<extra></extra>'
+                ), row=2, col=1)
+
+                # Residuals vs Time (row 3)
+                fig.add_trace(go.Scatter(
+                    x=segment_residuals['date'],
+                    y=segment_residuals['residual_pct'],
+                    mode='markers',
+                    name=f'{curve_id} - Seg {segment_num}',
+                    marker=dict(color=color, size=6, opacity=0.7, symbol=marker),
+                    legendgroup=curve_id,
+                    showlegend=False,  # Don't duplicate in legend
+                    hovertemplate='<b>Residuals vs Time</b><br>' +
+                                '<b>Date:</b> %{x}<br>' +
+                                '<b>Residual:</b> %{y:.1f}%<extra></extra>'
+                ), row=3, col=1)
+
+        # Add reference lines for residuals
+        reference_lines = [0, 10, -10, 20, -20]
+        for y_val in reference_lines:
+            line_color = 'black' if y_val == 0 else ('red' if abs(y_val) == 10 else 'orange')
+            line_style = 'solid' if y_val == 0 else 'dash'
+
+            # Add to both residual plots
+            for row in [2, 3]:
+                fig.add_hline(y=y_val, line_dash=line_style, line_color=line_color,
+                            opacity=0.5, line_width=1, row=row, col=1)
+
+    def _plot_discharge_vs_level_with_curves(self, fig: go.Figure, curve_data: Dict[str, pd.DataFrame], config: Dict[str, str],
+                                           show_measurements: Dict[str, bool] = None, show_lines: Dict[str, bool] = None):
+        """
+        Special plotting method for discharge vs level that matches the plot_curves() approach.
+        Adds rating curve lines and uses colors for curves, markers for segments.
+        """
+        # Define markers for different segments within curves
+        segment_markers = ['circle', 'square', 'diamond', 'triangle-up', 'triangle-down',
+                          'triangle-left', 'triangle-right', 'pentagon', 'hexagon', 'star']
+
+        # Define line styles for better distinction between segments
+        line_styles = ['solid', 'dash', 'dot', 'dashdot', 'longdash', 'longdashdot']
+
+        # Default to showing everything if no preferences provided
+        if show_measurements is None:
+            show_measurements = {curve_id: True for curve_id in curve_data.keys()}
+        if show_lines is None:
+            show_lines = {curve_id: True for curve_id in curve_data.keys()}
+
+        # For each curve, plot measurements and rating curve lines
+        for curve_id, data in curve_data.items():
+            if data.empty:
+                continue
+
+            # Get color for this curve
+            color = self._curve_colors.get(curve_id, 'gray')
+
+            # Get all segments for this curve to draw rating curve lines
+            curve_segments = self.rating_curves[self.rating_curves['curve_id'] == curve_id]
+
+            # Sort segments by segment number for consistent ordering
+            curve_segments = curve_segments.sort_values('segment_number')
+
+            # Plot measurement data grouped by segment with different markers
+            if show_measurements.get(curve_id, True) and 'segment_number' in data.columns:
+                # Sort segment numbers for consistent legend ordering
+                sorted_segments = sorted(data['segment_number'].unique())
+
+                for segment_num in sorted_segments:
+                    segment_data = data[data['segment_number'] == segment_num]
+
+                    # Use segment number to assign markers consistently
+                    # Extract segment number (e.g., "01/01" -> 1)
+                    try:
+                        seg_idx = int(segment_num.split('/')[0])
+                        marker_idx = seg_idx % len(segment_markers) - 1
+                    except:
+                        marker_idx = hash(segment_num) % len(segment_markers)
+
+                    marker = segment_markers[marker_idx]
+
+                    # Filter out NaN values
+                    mask = segment_data['discharge'].notna() & segment_data['level'].notna()
+                    if not mask.any():
+                        continue
+
+                    plot_data = segment_data[mask]
+
+                    fig.add_trace(go.Scatter(
+                        x=plot_data['discharge'],
+                        y=plot_data['level'],
+                        mode='markers',
+                        name=f'{curve_id} - Seg {segment_num}',
+                        marker=dict(color=color, size=8, opacity=0.7, symbol=marker),
+                        legendgroup=curve_id,
+                        showlegend=True,
+                        hovertemplate='<b>Curve:</b> %{fullData.name}<br>' +
+                                    '<b>Discharge:</b> %{x:.2f} m³/s<br>' +
+                                    '<b>Level:</b> %{y:.1f} cm<br>' +
+                                    '<b>Date:</b> %{customdata}<extra></extra>',
+                        customdata=plot_data['date'].dt.strftime('%Y-%m-%d')
+                    ))
 
 
 class ProfileAnalyzer(BaseStationAnalyzer):
@@ -1472,7 +1820,7 @@ class DashboardApp:
                 st.metric("Rating Curves", summary['rating_curves'])
 
             # Main content in tabs
-            tab1, tab2, tab3, tab4 = st.tabs(["📈 Timeseries Analysis", "📊 Scatter Analysis", "🏔️ Vertical Profiles", "⚙️ Rating Curve Adjustment"])
+            tab1, tab2, tab3, tab4 = st.tabs(["📈 Timeseries Analysis", "📊 Rating Curve Analysis", "🏔️ Vertical Profiles", "⚙️ Rating Curve Adjustment"])
 
             with tab1:
                 self._render_timeseries_tab()
@@ -1543,7 +1891,6 @@ class DashboardApp:
 
     def _render_scatter_tab(self):
         """Render the scatter analysis tab."""
-        st.subheader("Scatter Plots by Rating Curve")
 
         if len(self.scatter_analyzer.measured_data) == 0:
             st.warning("No measured data (stage_discharge) available for scatter plots")
@@ -1553,75 +1900,65 @@ class DashboardApp:
             st.warning("No rating curves available for filtering")
             return
 
-        col1, col2 = st.columns([1, 3])
+        # Use all available curves (no selection needed)
+        unique_curves = self.scatter_analyzer.rating_curves['curve_id'].unique()
+        selected_curves = list(unique_curves)
 
-        with col1:
-            # Plot type selection
-            plot_options = {
-                'discharge_vs_level': 'Discharge vs Level',
-                'area_vs_level': 'Area vs Level',
-                'area_velocity_vs_discharge': 'Area×Velocity vs Discharge',
-                'velocity_vs_level': 'Velocity vs Level'
-            }
+        # Data summary at the top
+        curve_data = self.scatter_analyzer.get_data_by_rating_curve(selected_curves)
+        total_points = sum(len(df) for df in curve_data.values())
 
-            selected_plot = st.selectbox(
-                "Scatter Plot Type",
-                options=list(plot_options.keys()),
-                format_func=lambda x: plot_options[x]
-            )
+        st.subheader("Rating Curves Data Summary")
+        col_a, col_b = st.columns(2)
 
-            # Rating curve selection with checkboxes
-            st.subheader("Rating Curve Selection")
-            available_curves = self.scatter_analyzer.rating_curves['curve_id'].tolist()
+        with col_a:
+            st.metric("Total Points", total_points)
+            st.metric("Available Curves", len(curve_data))
 
-            # Create checkboxes for each curve
-            selected_curves = []
+        with col_b:
+            # Points per curve breakdown
+            if curve_data:
+                st.write("**Points per Curve:**")
+                for curve_id, data in curve_data.items():
+                    # Create user-friendly display name
+                    try:
+                        start_date, end_date = curve_id.split('_')
+                        if end_date == '2099-12-31':
+                            display_name = f"{start_date} to Current"
+                        else:
+                            display_name = f"{start_date} to {end_date}"
+                    except:
+                        display_name = curve_id
 
-            # Add "Select All" checkbox
-            select_all = st.checkbox("Select All", value=True)
+                    # Show segments info if available
+                    if 'segment_number' in data.columns:
+                        segments = data['segment_number'].unique()
+                        segment_text = f" ({len(segments)} segments)"
+                    else:
+                        segment_text = ""
 
-            st.write("**Available Curves:**")
-            for curve_id in available_curves:
-                # Use select_all to determine default state
-                default_checked = select_all
+                    st.write(f"• {display_name}: {len(data)} points{segment_text}")
 
-                # Create individual checkbox
-                is_checked = st.checkbox(
-                    curve_id,
-                    value=default_checked,
-                    key=f"curve_{curve_id}"
-                )
+        # Plot type selection
+        plot_options = {
+            'discharge_vs_level': 'Discharge vs Level',
+            'area_vs_level': 'Area vs Level',
+            'area_velocity_vs_discharge': 'Area×Velocity vs Discharge',
+            'velocity_vs_level': 'Velocity vs Level'
+        }
 
-                if is_checked:
-                    selected_curves.append(curve_id)
+        selected_plot = st.selectbox(
+            "Scatter Plot Type",
+            options=list(plot_options.keys()),
+            format_func=lambda x: plot_options[x]
+        )
 
-        with col2:
-            if selected_curves:
-                # Create scatter plot
-                fig = self.scatter_analyzer.plot_scatter(selected_plot, selected_curves)
-                st.plotly_chart(fig, use_container_width=True)
-
-                # Data filtering info below the plot
-                curve_data = self.scatter_analyzer.get_data_by_rating_curve(selected_curves)
-                total_points = sum(len(df) for df in curve_data.values())
-
-                # Show detailed breakdown
-                st.subheader("Data Summary")
-                col_a, col_b = st.columns(2)
-
-                with col_a:
-                    st.metric("Total Points", total_points)
-                    st.metric("Selected Curves", len(curve_data))
-
-                with col_b:
-                    # Points per curve breakdown
-                    if curve_data:
-                        st.write("**Points per Curve:**")
-                        for curve_id, data in curve_data.items():
-                            st.write(f"• {curve_id}: {len(data)} points")
-
-            else:
-                st.info("Please select at least one rating curve to display the scatter plot")
+        if selected_curves:
+            # Create scatter plot
+            fig = self.scatter_analyzer.plot_scatter(selected_plot, selected_curves)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No rating curves available for this station")
 
     def _render_profile_tab(self):
         """Render the vertical profiles analysis tab."""
